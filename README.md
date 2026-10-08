@@ -225,7 +225,13 @@ python tests/run_tests.py
 当前结果：**156 checks, 0 failures / ALL TESTS PASSED**。
 
 改动 `main.lua` 后建议至少跑一次测试，能挡住绝大多数"上了设备才发现"的低级错误
+
 （这类插件在设备上没有交互式调试器，日志是唯一线索，所以离线测试很值）。
 
 工作目录里的 `_research/` 是调研期间下载的 KOReader master 源码与调研笔记
+
 （`koreader-自动翻页插件调研.md`），仅供查阅，不影响插件运行，可以整个删掉。
+
+ ## 7. 其他说明
+
+ 本人并非开发，不会太会使用github，插件和github的发布均为使用deepseek辅助制作和照步骤发布出来的，如果有人需要修改请自行拿取
