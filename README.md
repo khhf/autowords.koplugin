@@ -1,235 +1,278 @@
-# AutoWords —— 按字数自动翻页的 KOReader 插件
+# AutoWords
 
-**一个可以按每页字数调整翻页时间的插件**
-使用deepseek harness制作，本人并非开发人员，仅是看到插件中没有这种插件，但又不想使用定时翻页功能，以个人需求出发开发了此插件
+**A word-count-aware auto page turner for [KOReader](https://koreader.rocks/).**
 
-```
-autowords.koplugin/
-├── _meta.lua              # 插件元信息（名称、描述）
-├── main.lua               # 插件主体：计时、翻页、菜单、对话框
-├── autowords_count.lua    # 纯 Lua 的 UTF-8 字数/词数统计（无依赖）
-└── autowords_i18n.lua     # 界面文本（中文表 + 其它语言交给 KOReader 翻译）
-```
+AutoWords decides when to turn the page from *how much text is on screen right now*,
+instead of waiting a fixed number of seconds. A dense page gets more time; a page holding
+three lines gets less. The reading speed can be calibrated on the very page you are
+looking at.
+
+*Read this in [简体中文](README_zh-CN.md).*
 
 ---
 
-## 1. 它做什么
+## Why another auto-turner?
 
-KOReader 自带的 AutoTurn 是"每隔固定秒数翻一页"。问题很明显：一页只有两行字和一页
-密密麻麻的文字，用同一个秒数必然有一边不合适。
+KOReader ships **AutoTurn**, which waits a fixed interval before every page turn. A fixed
+interval always forces a compromise: tune it for dense pages and sparse pages feel
+sluggish, tune it for sparse pages and dense ones turn before you finish them.
 
-AutoWords 改成**按字数计时**：
+AutoWords measures the visible text and computes a delay per page:
 
 ```
-本页停留时间 = 本页可见文字数 ÷ 阅读速度（字/分钟） × 60 秒
+delay = (units of text on screen) / (reading speed) * 60 seconds
 ```
 
-而"阅读速度"可以直接**用你正在看的这一页来校准**——设置界面里始终显示当前页有多少字，
-以及按当前速度会停留多少秒。这就是你说的"显示当前页面有多少文字，以便用户校准自己的阅读速度"。
+## Features
 
-### 使用流程
+| | |
+| --- | --- |
+| 📖 **Paced by text** | Every page turn is timed from the amount of text actually visible |
+| 🎯 **Calibrated in place** | The dialog always shows this page's count and the resulting delay; *Calibrate on this page* derives your speed from a single number you type |
+| 🔤 **Two counting modes** | *Characters* (every non-space UTF-8 code point, CJK-friendly) or *Words* (CJK per character, latin per word) |
+| ⏱️ **Floor and ceiling** | Never turn faster than N seconds, never wait longer than M |
+| 👆 **Restart on touch** | Touching the screen restarts the countdown for the current page |
+| 📐 **Page distance** | How far the view moves per turn (fractional values work in scroll mode) |
+| 🅰️ **Status-bar icon** | A small selectable badge in the top (*Alt status bar*) and/or the bottom status bar, visible only while AutoWords runs |
+| 🎛️ **Gestures / shortcuts** | Registered as dispatcher actions: `AutoWords: start/stop`, `AutoWords: settings` |
+| 🩺 **Diagnostics** | One dialog listing every piece of state that matters when the icon does not show up |
+| 🌐 **Localized UI** | Follows KOReader's language; English and Simplified Chinese ship in-tree |
 
-1. 打开一本书，在阅读界面点顶部菜单 → **导航** → **AutoWords**
-2. 对话框顶部会显示，例如：
+## Requirements
 
-   ```
-   本页：486 字
-   阅读速度：300 字/分钟
-   → AutoWords 在此页停留 97.2 秒
-   ```
+- **KOReader** — developed and verified against current `master` sources.
+- **Reflowable documents only**: EPUB, FB2, TXT, HTML … (anything rendered by crengine).
+  PDF and DJVU are detected and refused on purpose — their text cannot be measured cheaply,
+  and the plugin says so instead of silently misbehaving.
+- The *top* status bar is optional and needs KOReader's **Alt status bar** to be enabled.
 
-3. 点 **以本页校准**，输入"我读完这一页需要多少秒"，比如 80 秒，
-   插件反推出速度 = 486 ÷ 80 × 60 ≈ 365 字/分钟并保存。
-4. 点 **开始**，之后每翻到一页，插件都会重新统计该页字数并按新字数计时。
-5. 再点一次 **停止** 即关闭。
+## Installation
 
-### 设置项
+The repository root **is** the plugin directory, so installing is just cloning it into
+KOReader's `plugins` directory — you should end up with `plugins/autowords.koplugin/`:
 
-| 菜单项 | 说明 | 默认 |
-| --- | --- | --- |
-| 阅读速度 | 每分钟读多少字/词，10–3000 | 300 |
-| 以本页校准 | 用当前页 + 你输入的秒数反推速度 | — |
-| 计数方式 | **字数**（每个非空白 UTF-8 字符算 1，中文直觉）／**词数**（中文逐字、西文按单词） | 字数 |
-| 最短停留 | 任何页面至少停留这么久（图片页很有用） | 2 秒 |
-| 最长停留 | 停留上限，0 = 不限制 | 不限 |
-| 触摸后重新计时 | 你触摸屏幕（手动翻页、划词…）后，本页倒计时重新开始 | 开 |
-| 翻页距离 | 每次翻多少屏，1 = 一整屏（滚动模式下可设小数） | 1 |
+```sh
+cd <KOReader install dir>/plugins
+git clone https://github.com/khhf/autowords.koplugin.git
+```
 
-**界面语言跟随 KOReader 的界面语言：中文界面显示中文，其余语言显示英文**
-（`autowords_i18n.lua` 里就是那张中文对照表，想改成别的语言照抄一份即可）。
+Or download the ZIP from the [releases page](https://github.com/khhf/autowords.koplugin/releases)
+and unpack it so that the plugin files sit in `plugins/autowords.koplugin/`.
 
-还可以把 **开始/停止** 和 **设置** 绑到手势或快捷键：手势 → 动作列表里搜 `AutoWords`
-（插件通过 `Dispatcher:registerAction` 注册了 `autowords_toggle` / `autowords_settings`）。
+Then restart KOReader **completely** — returning to the file browser is not enough.
 
----
-
-## 2. 安装
-
-把整个 `autowords.koplugin` 目录（不是里面的文件）复制到 KOReader 的 `plugins/` 目录：
-
-| 平台 | 路径 |
+| Platform | `plugins` directory |
 | --- | --- |
 | Kindle | `/mnt/us/koreader/plugins/` |
-| Kobo | `.kobo/koreader/plugins/`（KFMon 安装为 `.adds/koreader/plugins/`） |
+| Kobo | `.kobo/koreader/plugins/` |
 | PocketBook | `applications/koreader/plugins/` |
 | Android | `/sdcard/koreader/plugins/` |
-| Linux/macOS | KOReader 安装目录下的 `plugins/` |
+| Linux / macOS | `<KOReader install dir>/plugins/` |
 
-然后**完全重启 KOReader**（不是返回书架），插件即被加载。
-如果重启后没出现，去 菜单 → 插件管理 确认 AutoWords 是启用状态。
+Pure Lua, nothing to compile. If no menu entry shows up afterwards, check
+*Plugin management* in KOReader's menu.
 
-不需要任何编译，纯 Lua。
+## Usage
 
----
+1. Open a book, then **top menu → Navigation → AutoWords**.
+2. The dialog shows what AutoWords measured:
 
-## 3. 技术可行性（源码级结论）
+   ```
+   This page: 486 characters
+   Reading speed: 300 characters/min
+   → AutoWords waits 97.2 s on this page
+   ```
 
-针对你问的"能不能拿到当前页面有多少文字的接口"，我把 KOReader master 源码拉下来逐条核对过：
+3. Press **Calibrate on this page** and type how many seconds this page takes you — say 80.
+   The speed is derived and saved (486 ÷ 80 × 60 ≈ 365 characters/min).
+4. Press **Start**. From then on every page is measured and timed individually, and a
+   small icon appears in your status bar. Press **Stop** to end it — the icon disappears
+   immediately.
 
-**① `document:getPageText(pageno)` 不能用（关键坑）**
+### Status-bar icon
 
-`frontend/document/document.lua` 里的抽象实现是：
-
-```lua
-function Document:getPageText(pageno)
-    -- is this worth caching? not done yet.
-    local page = self._document:openPage(pageno)
-    local text = page:getPageText()
-    page:close()
-    return text
-end
-```
-
-但 `CreDocument._document` 是 crengine 的 userdata，它的方法表里**既没有 `openPage` 也没有
-`getPageText`**（`koreader-base/ffi/cre.cpp` 的 `credocument_meth` 全表可查），
-所以 `CreDocument:getPageText()` 会抛 `attempt to call a nil value (method 'openPage')`。
-全仓库也没有任何调用者——它是给 MuPDF 后端准备的，而且 PDF 那边返回的是结构化表而不是字符串。
-**所以"直接取整页文本"这条路在 EPUB 上是死的。**
-
-**② 正确接口：`CreDocument:getTextFromPositions(pos0, pos1, do_not_draw_selection)`**
-
-```lua
--- frontend/document/credocument.lua
-function CreDocument:getTextFromPositions(pos0, pos1, do_not_draw_selection)
-    ...
-    local text_range = self._document:getTextFromPositions(pos0.x, pos0.y, pos1.x, pos1.y,
-        drawSelection, drawSegmentedSelection)
-    if text_range then
-        local line_boxes = self:getScreenBoxesFromPositions(text_range.pos0, text_range.pos1, true)
-        return { text = text_range.text, pos0 = ..., pos1 = ..., sboxes = line_boxes }
-    end
-end
-```
-
-传 `{x=0,y=0}` 到 `{x=Screen:getWidth(), y=Screen:getHeight()}`、第三个参数 `true`
-（不画选区高亮），就能拿到**当前屏幕上这段文字**，然后自己数字数。
-KOReader 自己的状态栏"本页行数/字数"就是这么实现的
-（`ReaderView:getCurrentPageLineWordCounts()`，`readerview.lua:1466`）。
-
-返回 `nil`（图片页、坐标落在非文本节点上）或空串都可能出现，插件对两种情况都做了处理。
-
-**③ 其它可能的路**
-
-- 整页（含屏幕外）文本：`document:getPageXPointer(page)` 取本页起点 + 下一页起点，
-  再 `getTextFromXPointers(xp0, xp1)`。页号是 1-based。**插件没用这条路**，因为
-  自动翻页关心的是"读者接下来要读的这屏文字"，可见区域才是准确的口径（双页模式下
-  是左右两页之和）。
-- `getStatistics()` 返回的是文档级统计字符串，字段含义未公开保证，不能当页字数用。
-- `pagemap` 的 `chars_per_synthetic_page` 只是"合成页每页多少字符"的设置值，不是实际字数。
-
-**④ 性能**
-
-- `getTextFromPositions` 的结果**不进 crengine 的调用缓存**（它在 `setupCallCache` 里被标记为
-  `add_buffer_trash`），也就是说每次都是一次真实开销。所以插件**每次翻页只调用一次**，
-  并带一层以"页号 + 滚动位置"为键的缓存。
-- **没有任何轮询**：不是"每 100ms 检查一次"，而是"算出本页该停多久 → 定一个定时器 → 到点翻页"。
-  空闲时 CPU 开销为零。
-- 除文本提取外只有一遍线性字符扫描（`autowords_count.lua`，O(n)，不建中间表）。
-- 计时用 `UIManager:scheduleIn` / `unschedule`（和官方 AutoTurn 同一套），
-  并用 `PluginShare.pause_auto_suspend` 阻止阅读期间自动休眠（该标志由
-  `plugins/autosuspend.koplugin` 消费）。
-
-**⑤ PDF / DJVU**
-
-按你的要求不做支持，而且是**显式拒绝**而不是静默失效：插件通过
-`ui.paging` / `document.info.has_pages` 判断文档类型，固定版式文档会在尝试启用时提示
-"只支持可重排格式"并自动关掉。
-
----
-
-## 4. 比你原本设想更好的地方（以及为什么）
-
-你原本的思路是：设定一个"基准页字数 → 基准秒数"，再按 `当前页字数 ÷ 基准页字数 × 基准秒数`
-做一个比例换算。这个公式和我用的 `字数 ÷ 速度 × 60` 在数学上**完全等价**——
-区别只在"用户要输入什么"：
-
-- 你的口径要求用户先找到一个"标准页"，输入它的字数，再输入读它要几秒（两次输入，且要挑页面）；
-- 插件的口径只有一个内部量（速度，字/分钟），而它**可以自动从当前页反推**：
-  你在设置里选"以本页校准"，看一眼当前页字数（界面直接显示），输入"这页我读了 N 秒"，
-  速度就出来了。之后无论页面多密多疏，换算都自动完成。
-
-换句话说：**基准页是不必要的中间变量**，把它消掉之后精度一样，但用户的动作少一半，
-而且换书、换字号、换排版之后都不需要重新挑基准页（每次翻页都是按当页实际字数重算的）。
-
-另外几个刻意的设计选择：
-
-- **按可见区域而不是整页统计**：滚动模式下"页"的概念会漂移，
-  用屏幕可见文字数才是"我接下来要读多少字"的准确答案；
-- **每次翻页都重算，而不是全书算一次**：改字号、改页边距、换排版后无需任何额外操作；
-- **事件驱动重新计时**：手动翻页（`PageUpdate` / `PosUpdate` 事件）会立刻按新页字数重置倒计时，
-  不会出现"手动翻过去还要干等半分钟"的情况；
-- **到文末自动停**：翻页没有产生位移时（连续两次确认，或收到 crengine 的 `EndOfBook` 事件）
-  自动停用，而不是无限空转（`EndOfBook` 时不再自己弹窗，让官方 ReaderStatus 的"书末"提示照常出现）。
-
----
-
-## 5. 已知限制
-
-1. **不支持 PDF / DJVU / 图片型文档**（按需求设计）。
-2. 文本统计的是**屏幕可见区域**：双页模式下是两页之和；页眉页脚、页码如果属于正文流也会被计入。
-3. `getTextFromPositions` 在极少数情形（图片页、刚打开文档还没排版完）返回 `nil`，
-   此时按 0 字处理 → 使用"最短停留"时间，不会卡死。
-4. 弹出菜单、字典、对话框时**不会翻页**，会每 2 秒重试，关掉弹窗后自动恢复。
-5. 速度单位是"字/分钟"，需要一次校准才能贴合你的实际速度；默认 300 字/分钟对中文大致偏慢，
-   建议用"以本页校准"定一次。
-6. KOReader 的界面字符串需要 `.po` 目录文件，用户侧插件无法挂接，
-   所以中文是插件自带的小型对照表实现的（跟随界面语言）。
-
----
-
-## 6. 开发与测试
-
-`tests/` 下有一套**离线单元测试**：用纯 Lua（不需要设备、不需要 KOReader）加载真实的
-`autowords_count.lua` 和 `main.lua`，用 stub 顶替 KOReader 模块，验证：
-
-- UTF-8 计数：中英混排、空白（含全角空格 U+3000、不换行空格 U+00A0）、标点、空串、`nil`
-- 延迟计算：600 字 @300 字/分 = 120 秒；上限/下限钳制；速度为 0 的兜底
-- 固定版式文档被拒绝、图片页计 0、引擎抛错被 `pcall` 拦住
-- 调度：只允许一个待触发的定时器、翻页事件与距离、nextTick 之后再排下一次
-- 到文末：连续两次无位移 → 停用；`EndOfBook` 事件路径同样停用；
-  弹窗遮挡时只重试不翻页；触摸后重新计时；禁用时取消定时器、启用时持久化
-- `init()`：设置读取、菜单注册、`InputEvent` 钩子注册、定时任务创建
-- 生命周期：`onReaderReady` / `onSuspend` / `onResume` / `onCloseDocument` / `onCloseWidget`
-- 界面冒烟：菜单项与**全部 7 个对话框**（含每一个按钮回调、SpinWidget 回调）都能正常构造执行，
-  不支持 PDF 时也能正常提示而不崩
-- 中文本地化：译文正确、占位符保留、未翻译串回退英文
-
-运行（需要 `pip install lupa`，仅用于跑测试，插件本身不依赖它）：
+By default the badge lives in the **top status bar** (KOReader's *Alt status bar*), where
+crengine draws it at the left end of the right-hand block, just before the page number:
 
 ```
+┌──────────────────────────────────────────────┐
+│ Book title · chapter               Ⓐ 12/240  5.0% │
+├──────────────────────────────────────────────┤
+│                                              │
+│                   text …                     │
+│                                              │
+└──────────────────────────────────────────────┘
+```
+
+*More settings → Icon position* switches between **Top / Bottom / Both / Hidden**. The
+bottom bar is only touched when you explicitly ask for it (see the note in *How it works*).
+
+- The **top** bar needs KOReader's Alt status bar to be enabled (reader menu → Alt status
+  bar); without it that bar does not exist and no icon can be shown.
+- In the **bottom** bar the icon is the *External content* item of KOReader's status bar
+  settings — the official hook third-party plugins are given, the same one the stock SSH
+  and ReadTimer plugins use.
+- The icon is **not clickable**: KOReader gives its own status-bar taps higher priority
+  (top = open menu, bottom = cycle the status-bar mode), so a plugin cannot win that
+  fight. Open the settings from the menu, or bind `AutoWords: settings` to a gesture.
+- If the character renders as an empty box, your font lacks that glyph — pick another one
+  under *More settings → Icon character*; `(A)`, `[A]` and `A` are plain ASCII and always work.
+
+## Settings
+
+| Menu item | Description | Default |
+| --- | --- | --- |
+| Reading speed | Units per minute, 10–3000 | 300 |
+| Calibrate on this page | Derives the speed from this page plus a duration you type | — |
+| Counting mode | **Characters** (every non-space UTF-8 code point) / **Words** (CJK per character, latin per word) | Characters |
+| Minimum delay | Never turn faster than this — handy for image-only pages | 2 s |
+| Maximum delay | Upper bound, 0 = no limit | none |
+| Restart after touch | Touching the screen restarts the countdown for the current page | on |
+| Page distance | How far the view moves per turn, 1 = one screen | 1 |
+| Icon position | Top / Bottom / Both / Hidden | Top |
+| Icon character | `Ⓐ ⓐ (A) [A] A ●` | Ⓐ |
+| Diagnostics | Dumps plugin and status-bar state | — |
+
+## How it works
+
+### Measuring the text
+
+AutoWords counts the text of the **currently visible area**
+(`document:getTextFromPositions({x=0,y=0}, {x=screen_w, y=screen_h}, true)`) — the same
+call KOReader's own status bar uses for its line/word counter. In scroll mode this is the
+only meaningful definition anyway, and it means the count follows your font size, margins
+and layout changes for free.
+
+> `document:getPageText()` looks like the obvious API but is a trap: the base
+> implementation calls `self._document:openPage()`, which **crengine documents do not
+> have** — on an EPUB it raises *"attempt to call a nil value (method 'openPage')"*. It
+> exists for the MuPDF backend, where it returns structured data rather than a string.
+
+Counting itself is a single linear scan of the returned string (`autowords_count.lua`,
+no intermediate tables), with the two modes described above.
+
+### Timing
+
+`count / speed * 60` seconds, clamped to the minimum and maximum delay. The result is
+handed to `UIManager:scheduleIn()`, the same timer API the stock AutoTurn plugin uses.
+
+There is **no polling**: the plugin computes a delay once per page, schedules one
+callback, turns the page when it fires and then measures the new page. Idle cost is zero.
+`PluginShare.pause_auto_suspend` is set while running so the device does not auto-suspend
+mid-read.
+
+Page changes (manual ones included) arrive as `PageUpdate` / `PosUpdate` events and
+restart the countdown, so turning a page by hand never leaves you waiting for the old
+page's timer. At the end of the document (a forward move that changes nothing, or
+crengine's `EndOfBook` event) AutoWords stops itself instead of spinning.
+
+### The status-bar icon
+
+Neither status bar can host a plugin widget — both are text:
+
+- The bottom bar is a single `TextWidget` filled by `ReaderFooter:genFooterText()`;
+  plugins contribute through `ReaderFooter:addAdditionalFooterContent(func)` (this is what
+  the stock SSH and ReadTimer plugins use, and why the entry is called *External content*).
+- The top *Alt status bar* is painted by **crengine itself**: KOReader hands it a string
+  through `ReaderCoptListener:updatePageInfoOverride()`, and plugins prepend to it via
+  `crelistener:addAdditionalHeaderContent(func)`. Because crengine draws that whole string
+  **right-aligned**, a prepended icon ends up at the left end of the right-hand block.
+
+`ReaderFooter:addAdditionalFooterContent()` has a side effect worth knowing about: the
+first call rebuilds the mode index and runs `updateFooterTextGenerator()`, which rewrites
+`footer.mode` to the first enabled item. AutoWords therefore (1) only registers with the
+bottom bar when you ask for it, (2) does so after the document is ready rather than during
+plugin `init()`, and (3) saves and restores `footer.mode` around the call.
+
+### Cost
+
+One crengine text extraction plus one linear scan per page turn, nothing else — no timer
+faster than the page turn itself, no per-frame work. The icon is text, so drawing it costs
+KOReader exactly nothing.
+
+## Known limitations
+
+1. **No PDF / DJVU / image documents.** The text cannot be measured there; the plugin
+   detects it and refuses to start rather than guessing.
+2. **Top status bar only exists in paged mode** and only when KOReader's *Alt status bar*
+   is enabled; crengine does not draw it in scroll mode.
+3. The count is the **visible area**: in two-column mode that is both columns, and a
+   running header or page number inside the text flow is counted too.
+4. If the text extraction returns nothing (image-only page, document still laying out),
+   the count is 0 and the *minimum delay* applies — the plugin never stalls.
+5. **Menus and dialogs pause the turning**: while another window is on top, AutoWords
+   retries every 2 s instead of turning pages behind your menu.
+6. The reading speed is a single number — calibrate it once with *Calibrate on this page*
+   and it will fit your language and typography; the default 300 units/min is a guess.
+7. Localization of the readings themselves (KOReader needs `.po` catalogues, which a
+   user-side plugin cannot install) is done with a small in-tree table for Simplified
+   Chinese, falling back to KOReader's own translations everywhere else.
+
+## Troubleshooting
+
+**The icon does not show up.** Open *More settings → Diagnostics*. It lists, among others:
+
+- `Plugin loaded`, `Running` — has the plugin been started at all?
+- `Icon position` — is it set to *Top* while the Alt status bar is off?
+- `Status bar found` / `Status bar visible` — is the bottom bar there and shown?
+- `Alt status bar (top)` — is KOReader's Alt status bar enabled for this document?
+- `Status bar content registered` / `Alt status bar content registered` — did the
+  registration succeed?
+- `Text on this page` — did the text measurement return anything?
+
+**The bottom status bar changed or looks wrong.** KOReader's `addAdditionalFooterContent()`
+recomputes the bar's mode the first time it is used (see *How it works*). Keep *Icon
+position* on **Top**, or uncheck *External content* in KOReader's status-bar settings.
+
+**Pages turn too early / too late.** Use *Calibrate on this page* on a typical page, and
+check *Counting mode*: a page of English prose counted in *characters* gives roughly five
+times the number of *words*.
+
+## Development
+
+The plugin is plain Lua, and the test suite runs offline — no device, no KOReader
+required. It loads the real `main.lua` and `autowords_count.lua` with stubbed KOReader
+modules and checks counting, delay math, the scheduling state machine, the lifecycle
+hooks, every dialog and the status-bar registration.
+
+```
+python -m pip install lupa      # test runner only; the plugin itself has no dependencies
 python tests/run_tests.py
 ```
 
-当前结果：**156 checks, 0 failures / ALL TESTS PASSED**。
+Current status: **203 checks, 0 failures**.
 
-改动 `main.lua` 后建议至少跑一次测试，能挡住绝大多数"上了设备才发现"的低级错误
+```
+.                            # the repository root is the plugin directory
+├── _meta.lua                # plugin metadata
+├── main.lua                 # timing, page turning, menu, dialogs, status-bar wiring
+├── autowords_count.lua      # dependency-free UTF-8 counting
+├── autowords_i18n.lua       # UI strings (Chinese table + KOReader gettext)
+└── tests/                   # not installed, development only
+    ├── run_tests.py         # runner (lupa)
+    └── test_autowords.lua   # the tests themselves
+```
 
-（这类插件在设备上没有交互式调试器，日志是唯一线索，所以离线测试很值）。
+### Verification status
 
-工作目录里的 `_research/` 是调研期间下载的 KOReader master 源码与调研笔记
+Behaviour was derived from the KOReader `master` sources (file and line references are in
+the code comments) and is covered by the offline test suite. Rendering of the status-bar
+icon has been confirmed on a real device; the page-turning loop itself has not been
+exercised on one — bug reports with a `crash.log` excerpt are very welcome.
 
-（`koreader-自动翻页插件调研.md`），仅供查阅，不影响插件运行，可以整个删掉。
+## Contributing
 
- ## 7. 其他说明
+Issues and pull requests are welcome. Please run the test suite before submitting a
+change; if you touch the counting or the timing, add a case for it.
 
- 本人并非开发，不会太会使用github，插件和github的发布均为使用deepseek辅助制作和照步骤发布出来的，如果有人需要修改请自行拿取
+## Acknowledgements
+
+- [KOReader](https://github.com/koreader/koreader) — the reader this plugs into, and the
+  source of every API used here.
+- The stock **AutoTurn** plugin, which this one is deliberately modelled after (same timer
+  API, same suspend handling), and **SSH** / **ReadTimer**, whose use of
+  `addAdditionalFooterContent()` showed the way.
+
+## License
+
+[MIT](LICENSE) © 2026 khhf

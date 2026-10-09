@@ -1,0 +1,15 @@
+# KOReader sources downloaded locally while developing, for cross-checking APIs.
+# Not part of the plugin; feel free to delete the directory.
+_research/
+
+# Packaged plugin archives (publish these as GitHub Releases instead)
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*~
