@@ -528,6 +528,15 @@ function AutoWords:startGuide()
         })
         return
     end
+    -- The sentence guide is not verified on real devices yet: say so once per
+    -- session, so nobody wonders whether a missing line is a bug or a setting.
+    if not self._guide_warned then
+        self._guide_warned = true
+        UIManager:show(InfoMessage:new{
+            text = _("Experiment: the sentence guide has not been verified on a real device yet. If no line appears, please check More settings → Diagnostics."),
+            timeout = 6,
+        })
+    end
     self.guide:start()
 end
 
@@ -964,7 +973,7 @@ end
 --- Human readable name of the current reading mode.
 function AutoWords:readingModeName()
     if self:readingMode() == "sentence" then
-        return _("sentence guide")
+        return _("sentence guide (experimental)")
     end
     return _("whole page")
 end
@@ -974,7 +983,7 @@ function AutoWords:showModeDialog()
     local rows = {}
     for _, choice in ipairs({
         { value = "page", text = _("Whole page") },
-        { value = "sentence", text = _("Sentence guide") },
+        { value = "sentence", text = _("Sentence guide") .. "  " .. _("(experimental)") },
     }) do
         local value = choice.value
         table.insert(rows, {
@@ -996,7 +1005,7 @@ function AutoWords:showModeDialog()
     })
 
     self._mode_dialog = ButtonDialog:new{
-        title = _("Reading mode\n\nWhole page: turns the page once the text on it has been read.\n\nSentence guide: draws a line under the sentence being read and moves on sentence by sentence.\n\nThe two modes are mutually exclusive."),
+        title = _("Reading mode\n\nWhole page: turns the page once the text on it has been read.\n\nSentence guide: draws a line under the sentence being read and moves on sentence by sentence.\n\nThe two modes are mutually exclusive.\n\n⚠ The sentence guide is experimental: its logic is covered by offline tests, but it has not yet been verified on a real device. It may do nothing or stop immediately."),
         title_align = "center",
         buttons = rows,
     }

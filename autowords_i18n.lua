@@ -58,11 +58,15 @@ local zh = {
     ["stopped"] = "已停止",
     ["Whole page"] = "整页翻页",
     ["Sentence guide"] = "逐句导引",
+    ["(experimental)"] = "（实验性）",
+    ["sentence guide (experimental)"] = "逐句导引（实验性）",
+    ["Experiment: the sentence guide has not been verified on a real device yet. If no line appears, please check More settings → Diagnostics."] =
+        "实验功能：逐句导引尚未在真机上验证过。如果没有出现横线，请查看「更多设置 → 诊断信息」。",
     ["Sentence guide: %1"] = "逐句导引：%1",
     ["Sentence guide: %1\nThis sentence: %2 %3 → waits %4 s"] =
         "逐句导引：%1\n本句：%2 %3 → 停留 %4 秒",
-    ["Reading mode\n\nWhole page: turns the page once the text on it has been read.\n\nSentence guide: draws a line under the sentence being read and moves on sentence by sentence.\n\nThe two modes are mutually exclusive."] =
-        "阅读模式\n\n整页翻页：这一页的文字读完后翻页。\n\n逐句导引：在当前朗读的句子下面画一条横线，按句推进。\n\n两种模式互斥，只能选一个。",
+    ["Reading mode\n\nWhole page: turns the page once the text on it has been read.\n\nSentence guide: draws a line under the sentence being read and moves on sentence by sentence.\n\nThe two modes are mutually exclusive.\n\n⚠ The sentence guide is experimental: its logic is covered by offline tests, but it has not yet been verified on a real device. It may do nothing or stop immediately."] =
+        "阅读模式\n\n整页翻页：这一页的文字读完后翻页。\n\n逐句导引：在当前朗读的句子下面画一条横线，按句推进。\n\n两种模式互斥，只能选一个。\n\n⚠ 逐句导引是实验性功能：逻辑已由离线测试覆盖，但尚未在真机上验证过。它可能毫无反应，或者一启动就停止。",
     ["The sentence guide needs a reflowable document (EPUB, FB2, TXT ...)."] =
         "逐句导引需要可重排文档（EPUB、FB2、TXT 等）。",
     ["Min. sentence time: %1 s"] = "最短句停留：%1 秒",

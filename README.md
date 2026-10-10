@@ -33,7 +33,7 @@ delay = (units of text on screen) / (reading speed) * 60 seconds
 | ⏱️ **Floor and ceiling** | Never turn faster than N seconds, never wait longer than M |
 | 👆 **Restart on touch** | Touching the screen restarts the countdown for the current page |
 | 📐 **Page distance** | How far the view moves per turn (fractional values work in scroll mode) |
-| 📖 **Sentence guide** | Optional mode that walks the text sentence by sentence, underlining the sentence being read (never saved as an annotation) |
+| 📖 **Sentence guide** | ⚠ experimental, see below — walks the text sentence by sentence, underlining the sentence being read (never saved as an annotation) |
 | 🅰️ **Status-bar icon** | A small selectable badge in the top (*Alt status bar*) and/or the bottom status bar, visible only while AutoWords runs |
 | 🎛️ **Gestures / shortcuts** | Registered as dispatcher actions: `AutoWords: start/stop`, `AutoWords: settings` |
 | 🩺 **Diagnostics** | One dialog listing every piece of state that matters when the icon does not show up |
@@ -124,7 +124,7 @@ bottom bar is only touched when you explicitly ask for it (see the note in *How 
 | Menu item | Description | Default |
 | --- | --- | --- |
 | Reading speed | Units per minute, 10–3000 | 300 |
-| Reading mode | **Whole page** / **Sentence guide** (mutually exclusive) | Whole page |
+| Reading mode | **Whole page** (stable) / **Sentence guide** (⚠ experimental, mutually exclusive) | Whole page |
 | Calibrate on this page | Derives the speed from this page plus a duration you type | — |
 | Counting mode | **Characters** (every non-space UTF-8 code point) / **Words** (CJK per character, latin per word) | Characters |
 | Minimum delay | Never turn faster than this — handy for image-only pages | 2 s |
@@ -195,17 +195,25 @@ One crengine text extraction plus one linear scan per page turn, nothing else �
 faster than the page turn itself, no per-frame work. The icon is text, so drawing it costs
 KOReader exactly nothing.
 
-### The sentence guide
+### The sentence guide — ⚠ experimental
 
-*Sentence guide* is the second reading mode (the two modes are mutually
-exclusive): instead of timing whole pages, it walks the text one sentence at a
-time and keeps a single underline under the sentence being read.
+> **This mode has not been verified on a real device yet.** Its logic is covered by the
+> offline test suite, but no line has ever been seen on a screen. It may do nothing, or
+> stop right after starting. The default mode is *Whole page*, which is unaffected.
+> If you try it and nothing happens, *More settings → Diagnostics* shows where it stopped.
 
-- **Sentence boundaries come from crengine itself**,
-  `document:extendXPointersToSentenceSegment()` — the same call KOReader uses for
-  its *extend selection to sentence* action. The next sentence simply starts
-  where the previous one ended, so nothing is skipped or repeated, and there is
-  no regex guessing about what a sentence is.
+*Sentence guide* is the second reading mode (the two modes are mutually exclusive):
+instead of timing whole pages, it walks the text one sentence at a time and keeps a single
+underline under the sentence being read.
+
+- **Sentences are found by scanning the visible text**: the guide starts at the
+  first character on screen (`document:getTextFromPositions()`, the call KOReader's own
+  status-bar word counter uses) and walks forward with `getNextVisibleChar()` until a
+  sentence-ending punctuation mark, so the next sentence starts exactly where the
+  previous one ended. (It deliberately avoids
+  `document:extendXPointersToSentenceSegment()`: that only works when the position sits
+  right after punctuation and returns nothing otherwise, which made the guide give up on
+  real books.)
 - **The underline is not an annotation.** It is drawn through KOReader's
   *temporary* highlight (`view.highlight.temp` with
   `view.highlight.temp_drawer = "underscore"`), the same mechanism dictionary
@@ -308,10 +316,12 @@ Current status: **258 checks, 0 failures**.
 
 ### Verification status
 
-Behaviour was derived from the KOReader `master` sources (file and line references are in
-the code comments) and is covered by the offline test suite. Rendering of the status-bar
-icon has been confirmed on a real device; the page-turning loop itself has not been
-exercised on one — bug reports with a `crash.log` excerpt are very welcome.
+Everything was derived from the KOReader `master` sources (file and line references are in
+the code comments) and is covered by the offline test suite.
+
+- **Whole page mode and the status-bar icon have been used on a real device.**
+- **The sentence guide has not.** It ships as an experiment: the logic is tested, the
+  drawing is not. Diagnostics output and logs are very welcome.
 
 ## Contributing
 
