@@ -1128,6 +1128,31 @@ do
     check("the text holds that many characters (3 bytes each)", seg and #seg.text, 150)
 end
 
+do
+    -- the self-test file must be written and flushed on every step, so that a
+    -- crash still leaves a trail (there is no crash.log on Android, and a
+    -- killed process loses whatever was still buffered)
+    local path = Guide.selftestPath()
+    check("self-test path is set", type(path), "string")
+    check_true("self-test lives in /tmp", path:find("^/tmp/") ~= nil)
+
+    os.remove(path)
+    local guide, plugin = guide_instance()
+    scheduled = {}
+    guide:step()
+    local fh = io.open(path, "r")
+    check_true("self-test file was created", fh ~= nil)
+    local content = fh and fh:read("*a") or ""
+    if fh then fh:close() end
+    check_true("it announces each step", content:find(">>>", 1, true) ~= nil)
+    check_true("it records the visible area call",
+        content:find("getTextFromPositions", 1, true) ~= nil)
+    check_true("it records the underline being set",
+        content:find("underline on page", 1, true) ~= nil)
+    check_true("it records the repaint", content:find("repainting", 1, true) ~= nil)
+    os.remove(path)
+end
+
 -- ---------------------------------------------------------------------------
 
 print(string.format("\n%d checks, %d failures", checks, failures))

@@ -1332,6 +1332,8 @@ function AutoWords:showDiagnosticDialog()
     -- no crash.log to look at, so this is the only way to see where it stopped.
     local guide = self.guide
     if guide and self:readingMode() == "sentence" then
+        table.insert(lines, T(_("Self-test file: %1"), Guide.selftestPath()))
+        table.insert(lines, T(_("Last step: %1"), tostring(guide.stage_current or "-")))
         table.insert(lines, T(_("Guide scheduled: %1, paused: %2"),
             guide.scheduled and _("yes") or _("no"),
             guide.paused and _("yes") or _("no")))

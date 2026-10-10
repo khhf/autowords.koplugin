@@ -63,13 +63,81 @@ function Guide:setting(name)
     return value
 end
 
---- Remember a decision, both in the log and in a small in-memory buffer.
+--- Where the self-test trace is written.
 ---
---- The buffer matters on Android: KOReader does not always write a crash.log
---- there, so the Diagnostics dialog shows these lines instead.
+--- Kept in /tmp because that directory exists and is writable on every platform
+--- KOReader runs on (Linux, Android, Kindle, Kobo), and because on Android the
+--- app data directory is awkward to get at from a PC.  If /tmp cannot be
+--- written, the plugin falls back to the KOReader settings directory.
+local SELFTEST_PATH = "/tmp/autowords-selftest.txt"
+
+--- Write one line to the self-test file, flushed immediately.
+---
+--- Flushing matters: a crash kills the process and anything still sitting in a
+--- stdio buffer is lost, which is exactly why "run it with -d and look at the
+--- output" never showed us anything.
+local function selftest_write(line)
+    local function write_to(path)
+        local fh = io.open(path, "a")
+        if not fh then return false end
+        fh:write(line, "\n")
+        fh:flush()
+        fh:close()
+        return true
+    end
+
+    if not Guide._selftest_ok then
+        -- first call: truncate, so every run starts clean
+        local fh = io.open(SELFTEST_PATH, "w")
+        if fh then
+            fh:write("AutoWords self-test\n")
+            fh:close()
+            Guide._selftest_ok = true
+        else
+            Guide._selftest_ok = false
+        end
+    end
+
+    if Guide._selftest_ok and write_to(SELFTEST_PATH) then return end
+
+    -- fall back to the settings directory
+    local ok, DataStorage = pcall(require, "datastorage")
+    if ok and DataStorage then
+        local ok2, dir = pcall(DataStorage.getSettingsDir, DataStorage)
+        if ok2 and dir then
+            write_to(dir .. "/autowords-selftest.txt")
+        end
+    end
+end
+
+--- Announce what we are about to do, BEFORE doing it.
+---
+--- If the next call takes the process down, the self-test file already says
+--- which one it was -- that is the whole point of writing before, not after.
+function Guide:stage(fmt, ...)
+    local line = string.format(fmt, ...)
+    self.stage_current = line
+    local ok, err = pcall(selftest_write, string.format("%s  >>> %s",
+        os.date("%H:%M:%S"), line))
+    if not ok then
+        logger.warn("AutoWords guide: self-test write failed:", err)
+    end
+end
+
+--- Remember a decision: in the log, in a small in-memory buffer, and in the
+--- self-test file.
+---
+--- The buffer feeds the Diagnostics dialog, the file survives a crash -- on
+--- Android and in minimal Docker images there is no crash.log to look at, and
+--- stdout is buffered away when the process dies.
 function Guide:trace(fmt, ...)
     local line = string.format(fmt, ...)
     logger.dbg("AutoWords guide: " .. line)
+    local ok, err = pcall(selftest_write, string.format("%s  %s",
+        os.date("%H:%M:%S"), line))
+    if not ok then
+        logger.warn("AutoWords guide: self-test write failed:", err)
+    end
     self.trace_log = self.trace_log or {}
     table.insert(self.trace_log, line)
     while #self.trace_log > 24 do
@@ -151,6 +219,7 @@ end
 -- @treturn string|nil xpointer of the visible text start
 function Guide:visibleStart()
     local doc = self.plugin.ui.document
+    self:stage("getTextFromPositions (visible area)")
     local ok, res = pcall(doc.getTextFromPositions, doc,
         { x = 0, y = 0 },
         { x = Screen:getWidth(), y = Screen:getHeight() },
@@ -204,7 +273,12 @@ function Guide:scanSentence(xp, max_chars)
     local cur = xp
     local count = 0
     local oscillated = false
-    for _ = 1, limit do
+    for i = 1, limit do
+        if i % 25 == 1 then
+            -- heartbeat: if the next call hangs or crashes, the file says how
+            -- far we got
+            self:stage("scanning character %d at %s", i, tostring(cur))
+        end
         local ok, nxt = pcall(doc.getNextVisibleChar, doc, cur)
         if not ok or not nxt or nxt == cur or nxt == "" then break end
         if seen[nxt] then
@@ -261,6 +335,7 @@ end
 --- The screen boxes of a segment, one per displayed line.
 function Guide:sentenceBoxes(seg)
     local doc = self.plugin.ui.document
+    self:stage("getScreenBoxesFromPositions")
     local ok, boxes = pcall(doc.getScreenBoxesFromPositions, doc, seg.pos0, seg.pos1, true)
     if not ok then
         logger.warn("AutoWords guide: getScreenBoxesFromPositions failed:", boxes)
@@ -297,6 +372,7 @@ function Guide:showUnderline(seg)
     self.last_boxes = #boxes
     self:trace("underline on page %s over %d line(s), first at y=%s",
         tostring(page), #boxes, tostring(boxes[1] and boxes[1].y))
+    self:stage("repainting the view")
     self:redraw()
 end
 
@@ -316,6 +392,11 @@ function Guide:redraw()
     local view = self.plugin.ui.view
     if not view then return end
     UIManager:setDirty(view.dialog or view, "partial")
+end
+
+--- The path of the self-test file, for the Diagnostics dialog.
+function Guide.selftestPath()
+    return SELFTEST_PATH
 end
 
 -- ---------------------------------------------------------------------------
