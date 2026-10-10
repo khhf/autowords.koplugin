@@ -261,7 +261,7 @@ python -m pip install lupa      # 只是测试运行器；插件本身没有任�
 python tests/run_tests.py
 ```
 
-当前结果：**255 checks, 0 failures**。
+当前结果：**259 checks, 0 failures**。
 
 ```
 .                            # 仓库根目录就是插件目录

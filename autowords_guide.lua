@@ -74,6 +74,12 @@ function Guide:isSupported()
 end
 
 function Guide:isActive()
+    local ui = self.plugin and self.plugin.ui
+    -- Never touch the document through the FFI once it has been closed: a
+    -- stray timer callback running after onCloseDocument would be calling into
+    -- a torn-down crengine object.
+    if not ui or not ui.document or not ui.rolling then return false end
+    if ui.document.is_open == false then return false end
     return self.plugin.enabled
         and self.plugin.reading_mode == "sentence"
         and self:isSupported()
@@ -289,13 +295,16 @@ end
 -- ---------------------------------------------------------------------------
 
 function Guide:scheduleIn(delay)
+    -- Remember the exact function reference we schedule, so unscheduling cannot
+    -- miss it if the plugin drops its own reference meanwhile.
+    self.task = self.plugin.guide_task
     self.scheduled = true
-    UIManager:scheduleIn(delay, self.plugin.guide_task)
+    UIManager:scheduleIn(delay, self.task)
 end
 
 function Guide:unschedule()
-    if self.scheduled and self.plugin.guide_task then
-        UIManager:unschedule(self.plugin.guide_task)
+    if self.scheduled and self.task then
+        UIManager:unschedule(self.task)
     end
     self.scheduled = false
 end

@@ -1142,6 +1142,51 @@ do
     check("end of document is reported as such", reason, "end_of_document")
 end
 
+do
+    -- a closed document must make the guide inert (no FFI calls into a
+    -- torn-down crengine object), and a scheduled task must still be
+    -- cancellable even if the plugin dropped its own reference to it
+    local plugin = new_instance()
+    plugin.ui.document = { is_open = false, getCurrentPage = function() return 1 end }
+    plugin.ui.rolling = {}
+    plugin.reading_mode = "sentence"
+    plugin.enabled = true
+    local guide = Guide:new(plugin)
+
+    check("guide is inactive on a closed document", guide:isActive(), false)
+    scheduled = {}
+    guide:step()
+    check("step does nothing on a closed document", #scheduled, 0)
+
+    plugin.ui.document = {
+        is_open = true,
+        getXPointer = function() return "xp1" end,
+        getPrevVisibleChar = function() return nil end,
+        getNextVisibleChar = function(_, xp) return xp end,
+        extendXPointersToSentenceSegment = function(_, p0)
+            if p0 == "xp1" then return { text = "句子。", pos0 = "xp1", pos1 = "xp2" } end
+            return nil
+        end,
+        getScreenBoxesFromPositions = function() return { { x = 0, y = 0, w = 10, h = 10 } } end,
+        getPosFromXPointer = function() return { y = 100 } end,
+        getCurrentPage = function() return 1 end,
+    }
+    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
+    plugin.ui.view = {
+        highlight = { temp = {}, temp_drawer = "lighten" },
+        dialog = {},
+        footer_visible = false,
+    }
+    plugin.guide_task = function() end
+    scheduled = {}
+    guide:step()
+    check("guide scheduled its step", #scheduled, 1)
+
+    plugin.guide_task = nil -- plugin dropped its reference
+    guide:unschedule()      -- must still cancel the right one
+    check("the scheduled step can still be cancelled", #scheduled, 0)
+end
+
 -- ---------------------------------------------------------------------------
 
 print(string.format("\n%d checks, %d failures", checks, failures))
