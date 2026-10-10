@@ -1161,6 +1161,24 @@ do
 end
 
 do
+    -- refresh() must not repaint while the underline is still on screen: every
+    -- repaint is a screen refresh, and several events fire per position change
+    local guide, plugin = guide_instance()
+    scheduled = {}
+    guide:step()
+    check_true("the underline is on screen", #view_boxes(plugin) > 0)
+
+    dirty_calls = {}
+    guide:refresh()
+    check("no repaint while the underline is still there", #dirty_calls, 0)
+
+    -- KOReader clears the highlight on a page/pos update: then it is redrawn
+    plugin.ui.view.highlight.temp = {}
+    guide:refresh()
+    check("repainted once the view cleared it", #dirty_calls, 1)
+end
+
+do
     -- going back one sentence
     local guide, plugin = guide_instance()
     scheduled = {}

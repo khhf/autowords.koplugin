@@ -696,7 +696,7 @@ function Guide:step()
     local doc = self.plugin.ui.document
     local ok, page = pcall(doc.getCurrentPage, doc)
     if ok and page and self.page and page ~= self.page then
-        self:trace("the page changed to %s from the outside", tostring(page))
+        self:trace("now reading page %s (was %s)", tostring(page), tostring(self.page))
         self.page_sentences = nil
     end
 
@@ -811,12 +811,22 @@ function Guide:finish(reason)
     self.plugin:onGuideFinished(reason)
 end
 
---- Called when the document/page changed from the outside: redraw the
---- underline for the sentence we are on (KOReader clears highlight.temp itself
---- on every page/pos update).
+--- Called when the document/page changed from the outside: KOReader clears
+--- highlight.temp on every page/pos update, so the underline may have to be
+--- redrawn.
+---
+--- It is skipped when our highlight is still in place.  Redrawing costs a screen
+--- refresh, on e-ink the expensive part of this mode, and the same sentence was
+--- being drawn two or three times in a row because several events fire for one
+--- position change.
 function Guide:refresh()
     if not self:isActive() then return end
     if not self.segment then return end
+    local view = self.plugin.ui.view
+    local temp = view and view.highlight and view.highlight.temp
+    if temp and next(temp) ~= nil then
+        return -- still on screen, nothing to do
+    end
     self:showUnderline(self.segment)
 end
 
