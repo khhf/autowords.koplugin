@@ -456,8 +456,14 @@ function Guide:loadPage()
     local text = res.text
     local boxes = res.sboxes or {}
     local lines = Guide.splitLines(text)
-    self:trace("page %s: %d bytes, %d line(s), %d box(es)",
-        tostring(self.page), #text, #lines, #boxes)
+
+    -- Empty lines (a blank line between paragraphs, for instance) have no box
+    -- of their own, so they would shift every later line by one and put the
+    -- underline on the wrong line.
+    local visual = Guide.visualLines(text, lines)
+
+    self:trace("page %s: %d bytes, %d line(s), %d with text, %d box(es)",
+        tostring(self.page), #text, #lines, #visual, #boxes)
 
     if #boxes == 0 then
         self:trace("the page reported no line boxes")
@@ -465,20 +471,38 @@ function Guide:loadPage()
         return false
     end
 
-    if #lines == #boxes then
+    if #visual == #boxes then
+        self.page_sentences = Guide.attachBoxes(Guide.splitSentences(text),
+            visual, boxes, text)
+    elseif #lines == #boxes then
         self.page_sentences = Guide.attachBoxes(Guide.splitSentences(text),
             lines, boxes, text)
     else
         -- The two do not line up on this document: underline line by line,
         -- which still follows the reading, just with coarser granularity.
         self:trace("lines and boxes differ (%d vs %d): going line by line",
-            #lines, #boxes)
-        self.page_sentences = Guide.sentencesPerLine(text, lines, boxes)
+            #visual, #boxes)
+        self.page_sentences = Guide.sentencesPerLine(text, visual, boxes)
     end
 
     self.index = 1
     self:trace("page %s has %d step(s)", tostring(self.page), #self.page_sentences)
     return #self.page_sentences > 0
+end
+
+--- The lines that actually hold text: blank lines have no screen box, so they
+--- must not take part in the line-to-box mapping.
+-- @tparam string text the page text
+-- @tparam table lines from splitLines()
+-- @treturn table the lines that contain something
+function Guide.visualLines(text, lines)
+    local visual = {}
+    for _, line in ipairs(lines) do
+        if line.to >= line.from and text:sub(line.from, line.to):match("%S") then
+            visual[#visual + 1] = line
+        end
+    end
+    return visual
 end
 
 --- Paint the underline under the sentence being read.
@@ -626,7 +650,15 @@ function Guide:step()
             self:finish("end_of_page")
             return
         end
-        self:turnPage(function() self:step() end)
+        self:turnPage(function()
+            -- Let the view finish laying the new page out before reading it
+            -- back: asking straight away can return the page we just left,
+            -- whose sentences are already done with -- which turned the page
+            -- again immediately, over and over.
+            UIManager:scheduleIn(0.3, function()
+                if self:isActive() then self:step() end
+            end)
+        end)
         return
     end
 
@@ -635,6 +667,8 @@ function Guide:step()
 
     local delay = self:delayForSentence(sentence.text or "")
     self.index = self.index + 1
+    self:trace("step %d/%d done, next in %.1f s", self.index - 1,
+        #self.page_sentences, delay)
     self:scheduleIn(delay)
 end
 

@@ -532,15 +532,7 @@ function AutoWords:startGuide()
         })
         return
     end
-    -- The sentence guide is not verified on real devices yet: say so once per
-    -- session, so nobody wonders whether a missing line is a bug or a setting.
-    if not self._guide_warned then
-        self._guide_warned = true
-        UIManager:show(InfoMessage:new{
-            text = _("Experiment: the sentence guide has not been verified on a real device yet. If no line appears, please check More settings → Diagnostics."),
-            timeout = 6,
-        })
-    end
+
     self.guide:start()
 end
 

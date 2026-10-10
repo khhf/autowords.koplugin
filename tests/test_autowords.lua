@@ -993,7 +993,19 @@ do
 end
 
 do
-    -- the fallback when lines and boxes do not line up: one step per line
+    do
+    -- a blank line between paragraphs has no box of its own, so it must not
+    -- take part in the mapping -- otherwise every later line is shifted by one
+    -- and the underline lands on the wrong line
+    local text = "第一句。\n\n第二句。"
+    local lines = Guide.splitLines(text)
+    check("the blank line is still a line", #lines, 3)
+    local visual = Guide.visualLines(text, lines)
+    check("but it is dropped for the mapping", #visual, 2)
+    check("the lines that remain keep their order",
+        text:sub(visual[2].from, visual[2].to), "第二句。")
+end
+-- the fallback when lines and boxes do not line up: one step per line
     local steps = Guide.sentencesPerLine(PAGE_TEXT, Guide.splitLines(PAGE_TEXT), PAGE_BOXES)
     check("one step per text line", #steps, 2)
     check("the first step is line one", steps[1].boxes[1].y, 20)
@@ -1061,10 +1073,19 @@ do
         table.insert(plugin.events, ev.name)
     end
     plugin.ui.document = guide_doc({ getCurrentPage = function() return 6 end })
+    scheduled = {}
     fn()
     check("the page was turned", #(plugin.events or {}), 1)
     check("with GotoViewRel", plugin.events[1], "GotoViewRel")
-    check("and the new page was read", guide.page, 6)
+    -- The new page is read after a short delay on purpose: reading it back
+    -- immediately can return the page that was just left, which made the guide
+    -- turn page after page without ever showing a sentence.
+    check("the new page is not read instantly", guide.page, 5)
+    check("a delay was scheduled instead", #scheduled, 1)
+
+    local pending = table.remove(scheduled, 1)
+    pending.fn()
+    check("and then the new page is read", guide.page, 6)
     ticks = {}
 end
 
