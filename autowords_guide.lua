@@ -164,6 +164,11 @@ function Guide:visibleStart()
         self.last_reason = "no_visible_text"
         return nil
     end
+    -- Show what we are about to scan, so a bad xpointer is visible in the log.
+    local preview = res.text or ""
+    if #preview > 40 then preview = preview:sub(1, 40) .. "…" end
+    preview = preview:gsub("%s+", " ")
+    self:trace("visible text starts at %s: %s", tostring(res.pos0), preview)
     return res.pos0
 end
 
@@ -179,22 +184,44 @@ end
 -- @tparam string xp start xpointer
 -- @tparam[opt=400] number max_chars hard limit, so a paragraph without any
 --        punctuation cannot turn into an endless scan
+--- Scan forward from xp until a sentence ends.
+---
+--- Two safety nets, because a runaway loop here kills the whole reader: the
+--- step limit, and a "seen this position before" check.  crengine's
+--- getNextVisibleChar() can jump back and forth around inline markup, and
+--- without the second check the loop would simply keep going until the step
+--- limit -- 400 FFI calls plus 400 Lua strings per sentence, which on a slow
+--- device looks exactly like a freeze.
+-- @tparam string xp start xpointer
+-- @tparam[opt=400] number max_chars hard limit, so a paragraph without any
+--        punctuation cannot turn into an endless scan
 -- @treturn table|nil { text, pos0, pos1 }
 function Guide:scanSentence(xp, max_chars)
     local doc = self.plugin.ui.document
     local limit = max_chars or 400
     local parts = {}
+    local seen = {}
     local cur = xp
     local count = 0
+    local oscillated = false
     for _ = 1, limit do
         local ok, nxt = pcall(doc.getNextVisibleChar, doc, cur)
         if not ok or not nxt or nxt == cur or nxt == "" then break end
+        if seen[nxt] then
+            -- the xpointer chain is oscillating instead of advancing
+            oscillated = true
+            break
+        end
+        seen[cur] = true
         local ok2, chunk = pcall(doc.getTextFromXPointers, doc, cur, nxt)
         if not ok2 or not chunk or chunk == "" then break end
         parts[#parts + 1] = chunk
         count = count + 1
         cur = nxt
         if Guide.endsSentence(chunk) then break end
+    end
+    if oscillated then
+        self:trace("getNextVisibleChar stopped advancing at %s", tostring(cur))
     end
     if count == 0 then
         self.last_reason = "no_text_scanned"
@@ -218,7 +245,10 @@ function Guide:currentSegment()
         self:trace("starting at the visible text start")
     end
 
-    local seg = self:scanSentence(self.xp, 400)
+    -- Keep the first sentences short: a paragraph with no punctuation at all
+    -- would otherwise scan 400 characters before the underline appears, and the
+    -- first step is the one that has to feel instant.
+    local seg = self:scanSentence(self.xp, 200)
     if not seg then
         self.stop_reason = "end_of_document"
         self:trace("nothing to read from %s", tostring(self.xp))

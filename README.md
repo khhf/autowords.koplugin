@@ -300,7 +300,7 @@ python -m pip install lupa      # test runner only; the plugin itself has no dep
 python tests/run_tests.py
 ```
 
-Current status: **258 checks, 0 failures**.
+Current status: **262 checks, 0 failures**.
 
 ```
 .                            # the repository root is the plugin directory

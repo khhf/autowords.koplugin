@@ -1092,6 +1092,42 @@ do
     check("the scheduled step can still be cancelled", #scheduled, 0)
 end
 
+do
+    -- an oscillating xpointer chain must not keep the scanner running: without
+    -- the "seen this before" guard the loop would do its full 200 steps per
+    -- sentence, which on a slow device looks like a freeze
+    local steps = 0
+    local guide, plugin = guide_instance({
+        doc = {
+            getNextVisibleChar = function(_, xp)
+                steps = steps + 1
+                if xp == "c0" then return "c1" end
+                return "c0" -- always jumps back to c0: a clean oscillation
+            end,
+            getTextFromXPointers = function() return "字" end,
+        },
+    })
+    local seg = guide:scanSentence("c0", 200)
+    check_true("the scanner bailed out on an oscillating chain", steps <= 6)
+    check("it still returned what it had", seg and seg.text, "字")
+end
+
+do
+    -- a run without any sentence end stops at the step limit
+    local guide, plugin = guide_instance({
+        doc = {
+            getNextVisibleChar = function(_, xp)
+                local i = tonumber(xp:match("^c(%d+)$")) or 0
+                return "c" .. (i + 1)
+            end,
+            getTextFromXPointers = function() return "字" end, -- never ends a sentence
+        },
+    })
+    local seg = guide:scanSentence("c0", 50)
+    check("the step limit is honoured", seg and guide.scanned_chars, 50)
+    check("the text holds that many characters (3 bytes each)", seg and #seg.text, 150)
+end
+
 -- ---------------------------------------------------------------------------
 
 print(string.format("\n%d checks, %d failures", checks, failures))
