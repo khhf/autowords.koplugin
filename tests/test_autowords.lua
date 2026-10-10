@@ -1187,6 +1187,57 @@ do
     check("the scheduled step can still be cancelled", #scheduled, 0)
 end
 
+do
+    -- crengine refuses to extend a range that does not start right after
+    -- punctuation, so the guide has to walk back -- and it must do so by WORDS:
+    -- a Chinese sentence is easily 30 characters long
+    local tried = {}
+    local doc = {
+        getXPointer = function() return "w3" end,
+        getNextVisibleChar = function(_, xp) return xp end,
+        getPrevVisibleWordStart = function(_, xp)
+            if xp == "w3" then return "w2" end
+            if xp == "w2" then return "w1" end
+            return xp
+        end,
+        extendXPointersToSentenceSegment = function(_, p0)
+            table.insert(tried, p0)
+            if p0 == "w1" then
+                return { text = "整句话。", pos0 = "w1", pos1 = "w4" }
+            end
+            return nil -- mid-sentence: crengine returns nothing at all
+        end,
+        getScreenBoxesFromPositions = function() return { { x = 0, y = 20, w = 100, h = 16 } } end,
+        getPosFromXPointer = function() return { y = 100 } end,
+        getCurrentPage = function() return 1 end,
+    }
+    local view = {
+        highlight = { temp = {}, temp_drawer = "lighten" },
+        dialog = {},
+        footer_visible = false,
+    }
+    local plugin = new_instance()
+    plugin.ui.document = doc
+    plugin.ui.view = view
+    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
+    plugin.reading_mode = "sentence"
+    plugin.enabled = true
+    plugin.guide_task = function() end
+
+    local guide = Guide:new(plugin)
+    scheduled = {}
+    guide:step()
+
+    check("walked back to a real sentence start", guide.segment.text, "整句话。")
+    check("two word steps were needed", guide.back_steps, 2)
+    -- w3, w2, w1 while walking back, then w1 once more to read the sentence
+    check("the intermediate positions were tried as well", #tried, 4)
+    check("the sentence start is used afterwards", guide.xp, "w4")
+    check("the reject reason is cleared on success", guide.last_reason, nil)
+    check("the underline was drawn", #(view.highlight.temp[1] or {}), 1)
+    check("the box count is remembered for diagnostics", guide.last_boxes, 1)
+end
+
 -- ---------------------------------------------------------------------------
 
 print(string.format("\n%d checks, %d failures", checks, failures))

@@ -1312,6 +1312,32 @@ function AutoWords:showDiagnosticDialog()
         T(_("Status bar text: %1"), (footer and footer.footer_text and footer.footer_text.text) or "-"),
     }
 
+    -- In sentence mode, show what the guide last did: Android builds often have
+    -- no crash.log to look at, so this is the only way to see where it stopped.
+    local guide = self.guide
+    if guide and self:readingMode() == "sentence" then
+        table.insert(lines, T(_("Guide scheduled: %1, paused: %2"),
+            guide.scheduled and _("yes") or _("no"),
+            guide.paused and _("yes") or _("no")))
+        table.insert(lines, T(_("Guide position: %1"), tostring(guide.xp or "-")))
+        table.insert(lines, T(_("Guide stop reason: %1"), tostring(guide.stop_reason or "-")))
+        table.insert(lines, T(_("Guide last reject: %1"), tostring(guide.last_reason or "-")))
+        table.insert(lines, T(_("Guide steps back: %1"), tostring(guide.back_steps or 0)))
+        table.insert(lines, T(_("Guide last boxes: %1"), tostring(guide.last_boxes or "-")))
+        local text = guide.segment and guide.segment.text
+        if text and text ~= "" then
+            text = text:gsub("%s+", " ")
+            if #text > 60 then text = text:sub(1, 60) .. "..." end
+            table.insert(lines, T(_("Guide current sentence: %1"), text))
+        end
+        if guide.trace_log and #guide.trace_log > 0 then
+            table.insert(lines, _("Guide activity:"))
+            for i = math.max(1, #guide.trace_log - 9), #guide.trace_log do
+                table.insert(lines, "  " .. guide.trace_log[i])
+            end
+        end
+    end
+
     local dialog
     dialog = ButtonDialog:new{
         title = table.concat(lines, "\n"),

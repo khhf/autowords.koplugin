@@ -62,6 +62,20 @@ function Guide:setting(name)
     return value
 end
 
+--- Remember a decision, both in the log and in a small in-memory buffer.
+---
+--- The buffer matters on Android: KOReader does not always write a crash.log
+--- there, so the Diagnostics dialog shows these lines instead.
+function Guide:trace(fmt, ...)
+    local line = string.format(fmt, ...)
+    logger.dbg("AutoWords guide: " .. line)
+    self.trace_log = self.trace_log or {}
+    table.insert(self.trace_log, line)
+    while #self.trace_log > 24 do
+        table.remove(self.trace_log, 1)
+    end
+end
+
 -- ---------------------------------------------------------------------------
 -- Document support
 -- ---------------------------------------------------------------------------
@@ -137,44 +151,58 @@ end
 -- @treturn table|nil segment, @treturn string|nil reason when there is none
 function Guide:trySentence(xp)
     local doc = self.plugin.ui.document
-    if not xp then return nil, "no_position" end
+    if not xp then
+        self.last_reason = "no_position"
+        return nil, "no_position"
+    end
     local ok, seg = pcall(doc.extendXPointersToSentenceSegment, doc, xp, xp)
     if not ok then
-        logger.warn("AutoWords guide: extendXPointersToSentenceSegment failed:", seg)
+        self.last_reason = "call_failed"
+        self:trace("extendXPointersToSentenceSegment failed: %s", tostring(seg))
         return nil, "failed"
     end
     if not seg or not seg.pos0 or not seg.pos1 then
+        -- crengine returns nothing at all when the position is not a sentence
+        -- start (it does not return an empty range)
+        self.last_reason = "not_a_sentence_start"
         return nil, "empty"
     end
     if seg.pos1 == seg.pos0 then
-        -- crengine did not extend: this is not a sentence boundary
+        self.last_reason = "not_a_sentence_start"
         return nil, "not_a_boundary"
     end
+    self.last_reason = nil
     return seg
 end
 
---- Walk backwards until crengine agrees this is a sentence start, so the first
---- sentence shown is a complete one.  Bounded hard: every step is an FFI call,
---- and a stray xpointer chain must never turn into a long loop.
+--- Walk backwards until crengine agrees this is a sentence start, so that the
+--- first sentence shown is a complete one.
+---
+--- Backwards by WORD, not by character: crengine refuses to extend a range
+--- unless the position sits right after punctuation or whitespace, and a
+--- Chinese sentence is easily 30 characters long.  Stepping character by
+--- character ran out of budget long before reaching the start of the sentence,
+--- so the very first step gave up and looked like "end of document".
 function Guide:findSentenceStart(xp)
     local doc = self.plugin.ui.document
     local cur = xp
     local steps = 0
-    for _ = 1, 20 do
+    for _ = 1, 40 do
         local seg = self:trySentence(cur)
         if seg then
+            self.back_steps = steps
             if steps > 0 then
-                logger.dbg("AutoWords guide: sentence start found after", steps, "steps back")
+                self:trace("sentence start found %d word(s) back", steps)
             end
             return seg.pos0 or cur
         end
-        local ok, prev = pcall(doc.getPrevVisibleChar, doc, cur)
+        local ok, prev = pcall(doc.getPrevVisibleWordStart, doc, cur)
         if not ok or not prev or prev == cur or prev == "" then break end
         cur = prev
         steps = steps + 1
     end
-    logger.dbg("AutoWords guide: keeping the given position as sentence start after",
-        steps, "steps back")
+    self.back_steps = steps
+    self:trace("no sentence start found after %d word(s) back", steps)
     return cur
 end
 
@@ -202,7 +230,7 @@ function Guide:currentSegment()
             self.xp = xp
             return seg
         end
-        logger.dbg("AutoWords guide: no sentence at", tostring(xp), "(", reason, ")")
+        self.last_reason = reason
         local ok, nxt = pcall(doc.getNextVisibleChar, doc, xp)
         if not ok or not nxt or nxt == xp or nxt == "" then break end
         xp = nxt
@@ -210,7 +238,8 @@ function Guide:currentSegment()
 
     -- We walked to the end of the visible text without finding a sentence.
     self.stop_reason = "end_of_document"
-    logger.dbg("AutoWords guide: no sentence found at", tostring(self.xp))
+    self:trace("no sentence found at %s (last reason: %s)",
+        tostring(self.xp), tostring(self.last_reason))
     return nil
 end
 
@@ -250,8 +279,9 @@ function Guide:showUnderline(seg)
     local page_ok, page = pcall(doc.getCurrentPage, doc)
     if not page_ok or not page then page = 1 end
     view.highlight.temp = { [page] = boxes }
-    logger.dbg("AutoWords guide: underline on page", page, "over", #boxes, "line(s), first at y =",
-        (boxes[1] and boxes[1].y) or "?")
+    self.last_boxes = #boxes
+    self:trace("underline on page %s over %d line(s), first at y=%s",
+        tostring(page), #boxes, tostring(boxes[1] and boxes[1].y))
     self:redraw()
 end
 
