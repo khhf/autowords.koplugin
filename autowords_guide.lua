@@ -385,9 +385,10 @@ function Guide.attachBoxes(sentences, lines, boxes, text)
         local sentence_boxes = {}
         if first and last then
             for i = first, last do
-                local box = boxes[i]
+                local line = lines[i]
+                local box = line.box or boxes[i]
                 if box then
-                    local trimmed = Guide.trimBox(box, lines[i], sentence, text)
+                    local trimmed = Guide.trimBox(box, line, sentence, text)
                     sentence_boxes[#sentence_boxes + 1] = trimmed or box
                 end
             end
@@ -433,6 +434,17 @@ end
 -- ---------------------------------------------------------------------------
 
 --- Read the visible page and split it into sentences.
+---
+--- Two calls are needed, not one, and that is deliberate.  The text KOReader
+--- returns for the page breaks at PARAGRAPHS, not at screen lines: a page of
+--- 950 characters came back as 8 newlines for 38 lines of screen.  Mapping
+--- sentences onto boxes with that text put every sentence on the wrong line
+--- (and fell back to one step per paragraph, so a whole page was "read" in
+--- eight steps).
+---
+--- So the line boxes are taken first, and then the text of each line is read
+--- back from its own box.  That gives lines and boxes that really do correspond,
+--- one to one.
 -- @treturn boolean true when there is something to read
 function Guide:loadPage()
     local ui = self.plugin.ui
@@ -453,41 +465,96 @@ function Guide:loadPage()
     local page_ok, page = pcall(doc.getCurrentPage, doc)
     self.page = page_ok and page or nil
 
-    local text = res.text
     local boxes = res.sboxes or {}
-    local lines = Guide.splitLines(text)
-
-    -- Empty lines (a blank line between paragraphs, for instance) have no box
-    -- of their own, so they would shift every later line by one and put the
-    -- underline on the wrong line.
-    local visual = Guide.visualLines(text, lines)
-
-    self:trace("page %s: %d bytes, %d line(s), %d with text, %d box(es)",
-        tostring(self.page), #text, #lines, #visual, #boxes)
+    self:trace("page %s: %d bytes, %d box(es)",
+        tostring(self.page), #res.text, #boxes)
 
     if #boxes == 0 then
+        -- No line boxes: underline nothing rather than the wrong thing.
         self:trace("the page reported no line boxes")
         self.page_sentences = nil
         return false
     end
 
-    if #visual == #boxes then
-        self.page_sentences = Guide.attachBoxes(Guide.splitSentences(text),
-            visual, boxes, text)
-    elseif #lines == #boxes then
+    local text, lines = self:readLines(boxes)
+    self:trace("read back %d line(s)", #lines)
+
+    if #lines == 0 then
+        -- Could not read individual lines: fall back to the page text, which
+        -- at least follows the paragraphs.
+        text = res.text
+        lines = Guide.visualLines(text, Guide.splitLines(text))
         self.page_sentences = Guide.attachBoxes(Guide.splitSentences(text),
             lines, boxes, text)
     else
-        -- The two do not line up on this document: underline line by line,
-        -- which still follows the reading, just with coarser granularity.
-        self:trace("lines and boxes differ (%d vs %d): going line by line",
-            #visual, #boxes)
-        self.page_sentences = Guide.sentencesPerLine(text, visual, boxes)
+        self.page_sentences = Guide.attachBoxes(Guide.splitSentences(text),
+            lines, boxes, text)
     end
 
     self.index = 1
     self:trace("page %s has %d step(s)", tostring(self.page), #self.page_sentences)
     return #self.page_sentences > 0
+end
+
+--- Read the text of every line box, one call per line.
+---
+--- Returns the lines joined by newlines together with their byte ranges, so the
+--- usual splitting and box mapping work on text whose lines really are screen
+--- lines.
+-- @tparam table boxes line boxes, top to bottom
+-- @treturn string the page text, one line per box
+-- @treturn table line ranges in that text
+function Guide:readLines(boxes)
+    local doc = self.plugin.ui.document
+    local width = Screen:getWidth()
+    local parts = {}
+    local lines = {}
+    local offset = 1
+    local last = nil
+
+    for i, box in ipairs(boxes) do
+        -- Take the half-way points to the neighbouring boxes, so the regions
+        -- cannot overlap and no line is read twice.
+        local y_top = box.y
+        local y_bottom = box.y + (box.h or 1)
+        if i > 1 and boxes[i - 1] then
+            local prev_bottom = boxes[i - 1].y + (boxes[i - 1].h or 0)
+            y_top = (prev_bottom + box.y) / 2
+        end
+        if i < #boxes and boxes[i + 1] then
+            y_bottom = (box.y + (box.h or 0) + boxes[i + 1].y) / 2
+        end
+        if y_bottom <= y_top then y_bottom = y_top + 1 end
+
+        local ok, line = pcall(doc.getTextFromPositions, doc,
+            { x = 0, y = math.floor(y_top) },
+            { x = width, y = math.ceil(y_bottom) },
+            true)
+
+        local line_text = ok and line and line.text or ""
+        line_text = line_text:gsub("^%s+", ""):gsub("%s+$", "")
+
+        -- The regions are cut at half-way points so they cannot overlap, but
+        -- crengine snaps a position to the nearest line: if a line comes back
+        -- with exactly the previous line's text, the region overlapped it and
+        -- reading it twice would duplicate sentences.
+        if line_text ~= "" and line_text == last then
+            line_text = ""
+        end
+
+        -- Keep every line, empty ones included: that way lines and boxes stay
+        -- one to one, and an empty line simply holds no characters to map.
+        parts[#parts + 1] = line_text
+        lines[#lines + 1] = {
+            from = offset,
+            to = offset + #line_text - 1,
+            box = box,
+        }
+        offset = offset + #line_text + 1 -- +1 for the newline
+        if line_text ~= "" then last = line_text end
+    end
+
+    return table.concat(parts, "\n"), lines
 end
 
 --- The lines that actually hold text: blank lines have no screen box, so they

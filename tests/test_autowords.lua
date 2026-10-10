@@ -853,26 +853,60 @@ end
 
 local Guide = require("autowords_guide")
 
--- A page of text as KOReader reports it: two lines, three sentences.
---   line 1: "你好。世界！"   (bytes 1..18)
---   line 2: "第三句。"       (bytes 20..31)
-local PAGE_TEXT = "你好。世界！\n第三句。"
+-- A page of text as KOReader reports it: two screen lines, three sentences.
+--   行 1: "你好。世界！"
+--   行 2: "第三句。"
+--
+-- Note that the guide reads this page with TWO kinds of call: one for the whole
+-- screen (which yields the line boxes) and then one per line (because the page
+-- text KOReader returns breaks at paragraphs, not at screen lines).  This stub
+-- answers both, exactly like the real document does.
+local PAGE_LINES = { "你好。世界！", "第三句。" }
 local PAGE_BOXES = {
     { x = 0, y = 20, w = 200, h = 16 },
     { x = 0, y = 40, w = 200, h = 16 },
 }
+local PAGE_TEXT = table.concat(PAGE_LINES, "\n")
+
+-- the vertical region each box answers to, using the same half-way boundaries
+-- the guide uses so that no two regions overlap
+local function box_region(i)
+    local box = PAGE_BOXES[i]
+    local top = box.y
+    local bottom = box.y + box.h
+    if i > 1 then
+        local prev = PAGE_BOXES[i - 1]
+        top = (prev.y + prev.h + box.y) / 2
+    end
+    if i < #PAGE_BOXES then
+        local nxt = PAGE_BOXES[i + 1]
+        bottom = (box.y + box.h + nxt.y) / 2
+    end
+    return math.floor(top), math.ceil(bottom)
+end
 
 local function guide_doc(overrides)
     local doc = {
         is_open = true,
         getCurrentPage = function() return 5 end,
-        getTextFromPositions = function()
-            return {
-                text = PAGE_TEXT,
-                pos0 = "c0",
-                pos1 = "c1",
-                sboxes = PAGE_BOXES,
-            }
+        getTextFromPositions = function(_, p0, p1)
+            -- a whole-screen call: text plus every line box
+            if p1.y - p0.y > 100 then
+                return {
+                    text = PAGE_TEXT,
+                    pos0 = "c0",
+                    pos1 = "c1",
+                    sboxes = PAGE_BOXES,
+                }
+            end
+            -- a per-line call: the text of the line covering that region
+            for i = 1, #PAGE_BOXES do
+                local top, bottom = box_region(i)
+                if p0.y >= top and (p0.y < bottom or i == #PAGE_BOXES) then
+                    return { text = PAGE_LINES[i], pos0 = "L" .. i, pos1 = "L" .. i .. "e" }
+                end
+            end
+            return { text = "", pos0 = "", pos1 = "" }
         end,
     }
     for k, v in pairs(overrides or {}) do doc[k] = v end
