@@ -1253,6 +1253,91 @@ do
     ticks = {}
 end
 
+
+do
+    -- a sentence that lives on a page not shown yet must be reached by turning
+    -- the page; its screen boxes do not exist, which is what used to deadlock
+    -- the guide at the end of every page
+    local guide, plugin = guide_instance({
+        doc = {
+            getCurrentPage = function() return 5 end,
+            getPageFromXPointer = function() return 7 end,
+        },
+    })
+    plugin.guide_scroll = true
+    plugin.ui.handleEvent = function(_, ev)
+        plugin.events = plugin.events or {}
+        table.insert(plugin.events, ev.name)
+    end
+    ticks = {}
+    scheduled = {}
+    guide:step()
+    check("no underline for a sentence on a page not shown", guide.visible_boxes, nil)
+    check("no countdown is started either", #scheduled, 0)
+    check("a page turn is queued instead", #ticks, 1)
+    check("the page turn is marked pending", guide.turn_pending, true)
+    check("the sentence is remembered", guide.segment ~= nil, true)
+
+    local fn = table.remove(ticks, 1)
+    fn()
+    check("running the tick turned the page", #(plugin.events or {}), 1)
+    check("with GotoViewRel", plugin.events[1], "GotoViewRel")
+    -- This stub keeps reporting page 7 while page 5 is shown, so the re-run
+    -- queues another turn -- in a real book the page number would have moved on.
+    check("the re-run queues the next turn while the page is still behind", #ticks, 1)
+    ticks = {}
+end
+
+do
+    -- a sentence on the page being shown is underlined as usual
+    local guide, plugin = guide_instance({
+        doc = {
+            getCurrentPage = function() return 5 end,
+            getPageFromXPointer = function() return 5 end,
+        },
+    })
+    plugin.guide_scroll = true
+    ticks = {}
+    scheduled = {}
+    guide:step()
+    check("no page turn for a sentence on the current page", #ticks, 0)
+    check_true("the sentence is underlined", guide.visible_boxes ~= nil)
+    check("and the countdown runs", #scheduled, 1)
+end
+
+do
+    -- scroll mode has no pages to turn
+    local guide, plugin = guide_instance({
+        view_mode = "scroll",
+        doc = {
+            getCurrentPage = function() return 5 end,
+            getPageFromXPointer = function() return 7 end,
+        },
+    })
+    plugin.guide_scroll = true
+    ticks = {}
+    scheduled = {}
+    guide:step()
+    check("scroll mode never queues a page turn", #ticks, 0)
+    check("and it still schedules the next sentence", #scheduled, 1)
+end
+
+do
+    -- following switched off means no page turns at all
+    local guide, plugin = guide_instance({
+        doc = {
+            getCurrentPage = function() return 5 end,
+            getPageFromXPointer = function() return 7 end,
+        },
+    })
+    plugin.guide_scroll = false
+    ticks = {}
+    scheduled = {}
+    guide:step()
+    check("no page turn when following is disabled", #ticks, 0)
+    check("but reading goes on", #scheduled, 1)
+end
+
 -- ---------------------------------------------------------------------------
 
 print(string.format("\n%d checks, %d failures", checks, failures))

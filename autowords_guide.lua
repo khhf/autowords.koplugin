@@ -568,10 +568,11 @@ end
 --- the page from there re-enters the layout and the repaint while the timer is
 --- still on the stack.  One turn at a time, too -- otherwise a sentence that
 --- stays off-page would queue turns forever.
-function Guide:turnPage()
+-- @tparam[opt] function after called once the turn has been performed
+function Guide:turnPage(after)
     if self.turn_pending then return end
     self.turn_pending = true
-    self:trace("the sentence left the visible page: turning it")
+    self:trace("turning the page")
     UIManager:nextTick(function()
         self.turn_pending = false
         if not self:isActive() then return end
@@ -580,6 +581,13 @@ function Guide:turnPage()
         end)
         if not ok then
             self:trace("turning the page failed: %s", tostring(err))
+            return
+        end
+        if after then
+            local ok2, err2 = pcall(after)
+            if not ok2 then
+                self:trace("after the page turn: %s", tostring(err2))
+            end
         end
     end)
 end
@@ -669,6 +677,18 @@ function Guide:step()
         return
     end
 
+    -- Paged mode: the sentence may already be on a page that is not shown yet.
+    -- Its screen boxes cannot be read there (crengine only lays out the pages
+    -- around the current one), so the page has to be turned first -- judging by
+    -- the boxes is exactly what deadlocked the guide: no boxes, so no underline
+    -- and no turn either.
+    if self:needsPageTurn(seg) then
+        self.segment = seg
+        self:trace("sentence is not on the shown page yet: turning to it")
+        self:turnPage(function() self:step() end)
+        return
+    end
+
     self.segment = seg
     -- remember where this sentence started, so "previous sentence" can go back
     self.history = self.history or {}
@@ -682,6 +702,29 @@ function Guide:step()
     local delay = self:delayForSentence(seg.text or "")
     self.xp = seg.pos1
     self:scheduleIn(delay)
+end
+
+--- Is this sentence on a page that has not been reached yet?
+---
+--- Judged by page number, not by screen boxes: a sentence on the next page has
+--- no boxes at all, which is precisely the case where a turn is needed.
+function Guide:needsPageTurn(seg)
+    local ui = self.plugin.ui
+    local view = ui.view
+    if not view or (view.view_mode or "page") ~= "page" then return false end
+    if self.plugin.guide_scroll == false then return false end
+    local doc = ui.document
+    if not doc.getPageFromXPointer or not doc.getCurrentPage then return false end
+
+    local ok, sentence_page = pcall(doc.getPageFromXPointer, doc, seg.pos0)
+    if not ok or type(sentence_page) ~= "number" then return false end
+    local ok2, current_page = pcall(doc.getCurrentPage, doc)
+    if not ok2 or type(current_page) ~= "number" then return false end
+    if sentence_page <= current_page then return false end
+
+    self:trace("sentence is on page %d while page %d is shown",
+        sentence_page, current_page)
+    return true
 end
 
 --- Move on immediately (manual "next sentence").
