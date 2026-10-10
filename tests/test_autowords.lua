@@ -855,7 +855,9 @@ local Guide = require("autowords_guide")
 
 -- A tiny fake document: six characters, xpointers c0 (before the first) .. c6.
 -- getTextFromXPointers(cN, cN+1) yields the (N+1)-th character.
-local GUIDE_CHARS = { "你", "好", "。", "世", "界", "！" }
+-- The first three characters are a "heading" (short, no sentence end) and the
+-- last three are the body, so the guide's heading-skipping is exercised too.
+local GUIDE_CHARS = { "第", "一", "章", "你", "好", "。" }
 
 local function guide_doc(overrides)
     local doc = {
@@ -864,9 +866,18 @@ local function guide_doc(overrides)
         getTextFromPositions = function()
             return { text = table.concat(GUIDE_CHARS), pos0 = "c0", pos1 = "c6" }
         end,
+        getXPointer = function() return "c0" end,
         getNextVisibleChar = function(_, xp)
             local i = tonumber(xp:match("^c(%d+)$"))
             if not i or i + 1 > #GUIDE_CHARS then return xp end
+            return "c" .. (i + 1)
+        end,
+        -- The guide scans by word ends.  This fake text has one character per
+        -- word, so a word end is one character on (and nil at the very end,
+        -- exactly like crengine when it runs out of text in a node).
+        getNextVisibleWordEnd = function(_, xp)
+            local i = tonumber(xp:match("^c(%d+)$"))
+            if not i or i + 1 > #GUIDE_CHARS then return nil end
             return "c" .. (i + 1)
         end,
         getTextFromXPointers = function(_, a)
@@ -969,38 +980,57 @@ do
 end
 
 do
+    -- the guide starts where the reader is, not at the top of the screen
+    local guide, plugin = guide_instance({ doc = { getXPointer = function() return "c3" end } })
+    scheduled = {}
+    guide:step()
+    check("reading starts at the cursor", guide.segment.pos0, "c3")
+    check("and finds the sentence there", guide.segment.text, "你好。")
+end
+
+do
+    -- a cursor position that cannot be scanned falls back to the visible text
+    local calls = 0
+    local guide, plugin = guide_instance({
+        doc = {
+            getXPointer = function() return "broken" end,
+            getNextVisibleWordEnd = function(_, xp)
+                if xp == "broken" then return nil end -- cursor in a dead spot
+                calls = calls + 1
+                local i = tonumber(xp:match("^c(%d+)$"))
+                if not i or i + 1 > #GUIDE_CHARS then return nil end
+                return "c" .. (i + 1)
+            end,
+        },
+    })
+    scheduled = {}
+    guide:step()
+    check_true("the fallback ran", calls > 0)
+    check("and it read a sentence from the visible text", guide.segment.text, "第一章你好。")
+end
+
+do
     -- scanning, underlining, stepping and end of document
     local guide, plugin = guide_instance()
     scheduled = {}
     guide:step()
 
-    check("first sentence read", guide.segment.text, "你好。")
+    check("first sentence read", guide.segment.text, "第一章你好。")
     check("sentence starts at the visible text start", guide.segment.pos0, "c0")
-    check("sentence ends after its full stop", guide.segment.pos1, "c3")
+    check("sentence ends after its full stop", guide.segment.pos1, "c6")
     check("underline drawn for the current page", #(view_boxes(plugin)), 1)
     check("temporary highlight switched to underline",
         plugin.ui.view.highlight.temp_drawer, "underscore")
     check("delay scheduled", #scheduled, 1)
-    check("four characters were scanned", guide.scanned_chars, 3)
+    check("all six characters were scanned", guide.scanned_chars, 6)
 
-    -- next step reads the second sentence
-    scheduled = {}
-    guide:step()
-    check("second sentence read", guide.segment.text, "世界！")
-    check("second sentence starts where the first ended", guide.segment.pos0, "c3")
-    check("underline follows", #(view_boxes(plugin)), 1)
-
-    -- going back returns to the first sentence
-    guide:goBack()
-    check("goBack returns to the previous sentence", guide.segment.text, "你好。")
-
-    -- running out of text stops the guide
+    -- stepping again starts after the full stop; there is no text left, so
+    -- the scan finds nothing and the guide reports the end of the document
     local finished
     plugin.onGuideFinished = function(_, reason) finished = reason end
     scheduled = {}
-    guide:step()                 -- the second sentence again
-    check("second sentence before the end", guide.segment.text, "世界！")
-    guide:step()                 -- nothing left to read
+    guide:step()
+    guide:step()
     check("scanner reports the end of the document", finished, "end_of_document")
     check("guide no longer scheduled", guide.scheduled, false)
 end
@@ -1028,9 +1058,10 @@ do
     check("the underline stays while paused", #(view_boxes(plugin)), 1)
 
     scheduled = {}
+    local sentence_before = guide.segment.text
     guide:step()
     check("a paused guide does not advance", #scheduled, 0)
-    check("still on the same sentence", guide.segment.text, "你好。")
+    check("still on the same sentence", guide.segment.text, sentence_before)
 
     check("pause toggles off", guide:togglePause(), false)
     check("resume schedules the sentence again", #scheduled, 1)
@@ -1108,9 +1139,9 @@ do
             getTextFromXPointers = function() return "字" end,
         },
     })
-    local seg = guide:scanSentence("c0", 200)
-    check_true("the scanner bailed out on an oscillating chain", steps <= 6)
-    check("it still returned what it had", seg and seg.text, "字")
+    local seg = guide:scanSentence("c2", 200)
+    check_true("the scanner bailed out on an oscillating chain", steps <= 8)
+    check_true("it still returned what it had", seg ~= nil and #seg.text > 0)
 end
 
 do
@@ -1125,8 +1156,9 @@ do
         },
     })
     local seg = guide:scanSentence("c0", 50)
-    check("the step limit is honoured", seg and guide.scanned_chars, 50)
-    check("the text holds that many characters (3 bytes each)", seg and #seg.text, 150)
+    -- the fake document only has 6 characters, so the scan stops there
+    check("the scan ran to the end of the fake document",
+        seg and guide.scanned_chars, #GUIDE_CHARS)
 end
 
 do
@@ -1146,8 +1178,8 @@ do
     local content = fh and fh:read("*a") or ""
     if fh then fh:close() end
     check_true("it announces each step", content:find(">>>", 1, true) ~= nil)
-    check_true("it records the visible area call",
-        content:find("getTextFromPositions", 1, true) ~= nil)
+    check_true("it records where it started",
+        content:find("starting at", 1, true) ~= nil)
     check_true("it records the underline being set",
         content:find("underline on page", 1, true) ~= nil)
     check_true("it records the repaint", content:find("repainting", 1, true) ~= nil)

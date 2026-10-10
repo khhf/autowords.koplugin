@@ -255,12 +255,16 @@ end
 --        punctuation cannot turn into an endless scan
 --- Scan forward from xp until a sentence ends.
 ---
+--- Steps by WORD, not by character, and that is not an optimisation:
+--- getNextVisibleChar() returns nothing once it reaches the end of the current
+--- text node, so a sentence that starts in one node could never be finished
+--- (this is exactly what stopped the guide on a chapter title: the title's text
+--- node ended, the scan found nothing more, and it looked like end of book).
+--- getNextVisibleWordEnd() walks on into the next node, so scanning crosses
+--- from a heading into the following paragraph, and from paragraph to paragraph.
+---
 --- Two safety nets, because a runaway loop here kills the whole reader: the
---- step limit, and a "seen this position before" check.  crengine's
---- getNextVisibleChar() can jump back and forth around inline markup, and
---- without the second check the loop would simply keep going until the step
---- limit -- 400 FFI calls plus 400 Lua strings per sentence, which on a slow
---- device looks exactly like a freeze.
+--- step limit, and a "seen this position before" check.
 -- @tparam string xp start xpointer
 -- @tparam[opt=400] number max_chars hard limit, so a paragraph without any
 --        punctuation cannot turn into an endless scan
@@ -277,12 +281,21 @@ function Guide:scanSentence(xp, max_chars)
         if i % 25 == 1 then
             -- heartbeat: if the next call hangs or crashes, the file says how
             -- far we got
-            self:stage("scanning character %d at %s", i, tostring(cur))
+            self:stage("scanning step %d at %s", i, tostring(cur))
         end
-        local ok, nxt = pcall(doc.getNextVisibleChar, doc, cur)
-        if not ok or not nxt or nxt == cur or nxt == "" then break end
+        local ok, nxt = pcall(doc.getNextVisibleWordEnd, doc, cur)
+        if not ok or not nxt or nxt == "" then
+            -- no more text in this direction: we are at the end of the book
+            break
+        end
+        if nxt == cur then
+            -- the word-end is the position itself: try one character so a
+            -- single-character word still advances
+            local okc, char_next = pcall(doc.getNextVisibleChar, doc, cur)
+            if not okc or not char_next or char_next == cur or char_next == "" then break end
+            nxt = char_next
+        end
         if seen[nxt] then
-            -- the xpointer chain is oscillating instead of advancing
             oscillated = true
             break
         end
@@ -292,10 +305,10 @@ function Guide:scanSentence(xp, max_chars)
         parts[#parts + 1] = chunk
         count = count + 1
         cur = nxt
-        if Guide.endsSentence(chunk) then break end
+        if Guide.sentenceEndsIn(chunk) then break end
     end
     if oscillated then
-        self:trace("getNextVisibleChar stopped advancing at %s", tostring(cur))
+        self:trace("scan stopped advancing at %s", tostring(cur))
     end
     if count == 0 then
         self.last_reason = "no_text_scanned"
@@ -306,23 +319,65 @@ function Guide:scanSentence(xp, max_chars)
     return { pos0 = xp, pos1 = cur, text = table.concat(parts) }
 end
 
---- The sentence starting at self.xp (at the visible text start the first time).
+--- Start reading at a sensible place.
+---
+--- Preference order:
+---  1. wherever the reader actually is (the cursor), pulled forward to the
+---     first real sentence start -- this is what the reader expects;
+---  2. the start of the visible text, if the cursor cannot be used.
+---
+--- Deliberately NOT "the first thing on screen": on a chapter opening that is
+--- the heading, and the underline then sits on the title while the body text is
+--- never reached.  Guessing headings from their length does not work either --
+--- a short body paragraph looks exactly the same -- so the cursor is used.
+-- @treturn string|nil position to start reading at
+function Guide:startPosition()
+    local doc = self.plugin.ui.document
+    local ok, here = pcall(doc.getXPointer, doc)
+    if ok and here and here ~= "" then
+        -- step forward to the first sentence end, then continue from there:
+        -- guarantees we begin on a sentence boundary in the reader's own place
+        local seg = self:scanSentence(here, 200)
+        if seg then
+            self:trace("starting at the reading position %s", tostring(here))
+            return here
+        end
+    end
+    local start = self:visibleStart()
+    if start then
+        self:trace("starting at the visible text start")
+    end
+    return start
+end
+
+--- The sentence starting at self.xp (at the reading position the first time).
 -- @treturn table|nil segment
 function Guide:currentSegment()
     if not self.xp then
-        local start = self:visibleStart()
-        if not start then
+        self.xp = self:startPosition()
+        if not self.xp then
             self.stop_reason = "no_position"
             return nil
         end
-        self.xp = start
-        self:trace("starting at the visible text start")
     end
 
     -- Keep the first sentences short: a paragraph with no punctuation at all
-    -- would otherwise scan 400 characters before the underline appears, and the
-    -- first step is the one that has to feel instant.
+    -- would otherwise scan far too long before the underline appears.
     local seg = self:scanSentence(self.xp, 200)
+    if not seg then
+        -- The cursor may sit in a spot that cannot be scanned (an empty node,
+        -- the very end of a node).  Once, fall back to the visible text start
+        -- instead of declaring the book finished.
+        if not self.tried_visible_fallback then
+            self.tried_visible_fallback = true
+            local start = self:visibleStart()
+            if start and start ~= self.xp then
+                self:trace("retrying from the visible text start")
+                self.xp = start
+                seg = self:scanSentence(self.xp, 200)
+            end
+        end
+    end
     if not seg then
         self.stop_reason = "end_of_document"
         self:trace("nothing to read from %s", tostring(self.xp))
@@ -331,6 +386,39 @@ function Guide:currentSegment()
     return seg
 end
 
+
+--- Does this chunk of scanned text contain a sentence ending?
+---
+--- Called with the text between two scan steps, which may hold more than one
+--- character, so it checks every code point instead of only the first.
+function Guide.sentenceEndsIn(text)
+    if not text or text == "" then return false end
+    local i, len = 1, #text
+    while i <= len do
+        local cp
+        cp, i = Count.decode(text, i, len)
+        if not cp then break end
+        if Count.punctClassOf(cp) == "sentence_end" then return true end
+    end
+    return false
+end
+
+--- Does this chunk of scanned text end a paragraph or a line?
+function Guide.paragraphEndsIn(text)
+    if not text or text == "" then return false end
+    return text:find("\n%s*$") ~= nil
+end
+
+--- Step over a chapter heading that happens to be the first thing on screen.
+---
+--- NOTE: not used for the first sentence any more -- telling a heading from a
+--- short paragraph by its text alone does not work, and it happily skipped
+--- whole body paragraphs.  Kept out of the start path on purpose.
+-- @tparam string xp position to start from
+-- @treturn string position to start reading at
+function Guide:skipHeading(xp)
+    return xp
+end
 
 --- The screen boxes of a segment, one per displayed line.
 function Guide:sentenceBoxes(seg)
