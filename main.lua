@@ -76,8 +76,10 @@ local AutoWords = WidgetContainer:extend{
     guide_punct_scale = nil,     -- scales every punctuation pause at once
     -- Following the sentence by scrolling is the most invasive thing the guide
     -- does, so it starts OFF: the underline can be verified on its own first.
-    guide_scroll = false,
-    guide_scroll_position = nil, -- keep the sentence at this fraction of the usable height
+    -- Turn the page once every sentence on it has been read.  Off means the
+    -- guide stops at the end of the page instead.
+    guide_auto_turn = true,
+    guide_scroll_position = nil, -- (kept for compatibility, unused)
 
     -- runtime state
     retry_delay = 2,
@@ -637,7 +639,7 @@ function AutoWords:init()
     self.guide_end_pause = tonumber(G_reader_settings:readSetting("autowords_guide_end_pause"))
     self.guide_paragraph_pause = tonumber(G_reader_settings:readSetting("autowords_guide_paragraph_pause"))
     self.guide_punct_scale = tonumber(G_reader_settings:readSetting("autowords_guide_punct_scale"))
-    self.guide_scroll = G_reader_settings:isTrue("autowords_guide_scroll")
+    self.guide_auto_turn = G_reader_settings:nilOrTrue("autowords_guide_auto_turn")
     self.guide_scroll_position = tonumber(G_reader_settings:readSetting("autowords_guide_scroll_position"))
     self.enabled = G_reader_settings:isTrue("autowords_enabled")
 
@@ -1007,7 +1009,7 @@ function AutoWords:showModeDialog()
     })
 
     self._mode_dialog = ButtonDialog:new{
-        title = _("Reading mode\n\nWhole page: turns the page once the text on it has been read.\n\nSentence guide: draws a line under the sentence being read and moves on sentence by sentence.\n\nThe two modes are mutually exclusive.\n\n⚠ The sentence guide is experimental: its logic is covered by offline tests, but it has not yet been verified on a real device. It may do nothing or stop immediately."),
+        title = _("Reading mode\n\nWhole page: turns the page once the text on it has been read.\n\nSentence guide: draws a line under each sentence in turn, to help keep your eyes on the text, and turns the page when the page has been read.\n\nThe two modes are mutually exclusive.\n\nNote: the sentence guide redraws the screen for every sentence, so it uses noticeably more battery than plain page turning. It is off by default."),
         title_align = "center",
         buttons = rows,
     }
@@ -1178,10 +1180,10 @@ function AutoWords:showMoreDialog()
                     end,
                 },
                 {
-                    text = self.guide_scroll and _("Follow by scrolling: on") or _("Follow by scrolling: off"),
+                    text = self.guide_auto_turn and _("Turn the page when done: on") or _("Turn the page when done: off"),
                     callback = function()
-                        self.guide_scroll = not self.guide_scroll
-                        G_reader_settings:saveSetting("autowords_guide_scroll", self.guide_scroll)
+                        self.guide_auto_turn = not self.guide_auto_turn
+                        G_reader_settings:saveSetting("autowords_guide_auto_turn", self.guide_auto_turn)
                         UIManager:close(dialog)
                         if self:isActive() and self:readingMode() == "sentence" then
                             self:startGuide()
@@ -1339,12 +1341,12 @@ function AutoWords:showDiagnosticDialog()
         table.insert(lines, T(_("Guide scheduled: %1, paused: %2"),
             guide.scheduled and _("yes") or _("no"),
             guide.paused and _("yes") or _("no")))
-        table.insert(lines, T(_("Guide position: %1"), tostring(guide.xp or "-")))
-        table.insert(lines, T(_("Guide stop reason: %1"), tostring(guide.stop_reason or "-")))
-        table.insert(lines, T(_("Guide last reject: %1"), tostring(guide.last_reason or "-")))
-        table.insert(lines, T(_("Guide steps back: %1"), tostring(guide.back_steps or 0)))
+        table.insert(lines, T(_("Guide page: %1, step %2 of %3"),
+            tostring(guide.page or "-"),
+            tostring(guide.index or "-"),
+            tostring(guide.page_sentences and #guide.page_sentences or "-")))
         table.insert(lines, T(_("Guide last boxes: %1"), tostring(guide.last_boxes or "-")))
-        local text = guide.segment and guide.segment.text
+        local text = guide.last_text or (guide.segment and guide.segment.text)
         if text and text ~= "" then
             text = text:gsub("%s+", " ")
             if #text > 60 then text = text:sub(1, 60) .. "..." end

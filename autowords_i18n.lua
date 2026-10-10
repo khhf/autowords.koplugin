@@ -65,8 +65,9 @@ local zh = {
     ["Sentence guide: %1"] = "逐句导引：%1",
     ["Sentence guide: %1\nThis sentence: %2 %3 → waits %4 s"] =
         "逐句导引：%1\n本句：%2 %3 → 停留 %4 秒",
-    ["Reading mode\n\nWhole page: turns the page once the text on it has been read.\n\nSentence guide: draws a line under the sentence being read and moves on sentence by sentence.\n\nThe two modes are mutually exclusive.\n\n⚠ The sentence guide is experimental: its logic is covered by offline tests, but it has not yet been verified on a real device. It may do nothing or stop immediately."] =
-        "阅读模式\n\n整页翻页：这一页的文字读完后翻页。\n\n逐句导引：在当前朗读的句子下面画一条横线，按句推进。\n\n两种模式互斥，只能选一个。\n\n⚠ 逐句导引是实验性功能：逻辑已由离线测试覆盖，但尚未在真机上验证过。它可能毫无反应，或者一启动就停止。",
+    ["Reading mode\n\nWhole page: turns the page once the text on it has been read.\n\nSentence guide: draws a line under each sentence in turn, to help keep your eyes on the text, and turns the page when the page has been read.\n\nThe two modes are mutually exclusive.\n\nNote: the sentence guide redraws the screen for every sentence, so it uses noticeably more battery than plain page turning. It is off by default."] =
+        "阅读模式\n\n整页翻页：这一页的文字读完后翻页。\n\n逐句导引：依次在每句话下面画一条横线，让视线有东西跟着走、帮助保持专注；一页读完自动翻页。\n\n两种模式互斥，只能选一个。\n\n注意：逐句导引每句话都要刷新一次屏幕，所以比普通翻页明显更耗电。该功能默认关闭。",
+    ["Guide page: %1, step %2 of %3"] = "导引页码：%1，进度：%2 / %3",
     ["The sentence guide needs a reflowable document (EPUB, FB2, TXT ...)."] =
         "逐句导引需要可重排文档（EPUB、FB2、TXT 等）。",
     ["Min. sentence time: %1 s"] = "最短句停留：%1 秒",
@@ -90,8 +91,8 @@ local zh = {
     ["AutoWords guide resumed."] = "AutoWords 已继续。",
     ["AutoWords stopped: this position could not be read as a sentence."] =
         "AutoWords 已停止：这个位置读不出句子。",
-    ["Follow by scrolling: on"] = "自动滚动跟随：开",
-    ["Follow by scrolling: off"] = "自动滚动跟随：关",
+    ["Turn the page when done: on"] = "读完自动翻页：开",
+    ["Turn the page when done: off"] = "读完自动翻页：关",
     ["Guide scheduled: %1, paused: %2"] = "导引已排定：%1，已暂停：%2",
     ["Guide position: %1"] = "导引起点：%1",
     ["Guide stop reason: %1"] = "导引停止原因：%1",

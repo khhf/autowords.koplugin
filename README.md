@@ -33,7 +33,7 @@ delay = (units of text on screen) / (reading speed) * 60 seconds
 | ⏱️ **Floor and ceiling** | Never turn faster than N seconds, never wait longer than M |
 | 👆 **Restart on touch** | Touching the screen restarts the countdown for the current page |
 | 📐 **Page distance** | How far the view moves per turn (fractional values work in scroll mode) |
-| 📖 **Sentence guide** | ⚠ experimental, see below — walks the text sentence by sentence, underlining the sentence being read (never saved as an annotation) |
+| 📖 **Sentence guide** | Off by default; underlines each sentence in turn (never saved as an annotation) and turns the page when done. More battery use — see below |
 | 🅰️ **Status-bar icon** | A small selectable badge in the top (*Alt status bar*) and/or the bottom status bar, visible only while AutoWords runs |
 | 🎛️ **Gestures / shortcuts** | Registered as dispatcher actions: `AutoWords: start/stop`, `AutoWords: settings` |
 | 🩺 **Diagnostics** | One dialog listing every piece of state that matters when the icon does not show up |
@@ -124,7 +124,7 @@ bottom bar is only touched when you explicitly ask for it (see the note in *How 
 | Menu item | Description | Default |
 | --- | --- | --- |
 | Reading speed | Units per minute, 10–3000 | 300 |
-| Reading mode | **Whole page** (stable) / **Sentence guide** (⚠ experimental, mutually exclusive) | Whole page |
+| Reading mode | **Whole page** / **Sentence guide** (mutually exclusive, off by default) | Whole page |
 | Calibrate on this page | Derives the speed from this page plus a duration you type | — |
 | Counting mode | **Characters** (every non-space UTF-8 code point) / **Words** (CJK per character, latin per word) | Characters |
 | Minimum delay | Never turn faster than this — handy for image-only pages | 2 s |
@@ -195,124 +195,33 @@ One crengine text extraction plus one linear scan per page turn, nothing else �
 faster than the page turn itself, no per-frame work. The icon is text, so drawing it costs
 KOReader exactly nothing.
 
-### The sentence guide — ⚠ experimental
+### The sentence guide
 
-> **This mode has not been verified on a real device yet.** Its logic is covered by the
-> offline test suite, but no line has ever been seen on a screen. It may do nothing, or
-> stop right after starting. The default mode is *Whole page*, which is unaffected.
-> If you try it and nothing happens, *More settings → Diagnostics* shows where it stopped.
+*Sentence guide* is the second reading mode (the two modes are mutually exclusive): it
+walks the text one sentence at a time, underlining the sentence being read, and turns the
+page once everything on it has been read.
 
-*Sentence guide* is the second reading mode (the two modes are mutually exclusive):
-instead of timing whole pages, it walks the text one sentence at a time and keeps a single
-underline under the sentence being read.
+**It is off by default, and it costs battery.** Every sentence means another partial screen
+refresh, and on e-ink that is the expensive part -- noticeably more than plain page
+turning. It is meant for when you want something for your eyes to follow, to keep your
+attention away from your phone.
 
-- **Sentences are found by scanning the visible text**: the guide starts at the
-  first character on screen (`document:getTextFromPositions()`, the call KOReader's own
-  status-bar word counter uses) and walks forward with `getNextVisibleChar()` until a
-  sentence-ending punctuation mark, so the next sentence starts exactly where the
-  previous one ended. (It deliberately avoids
-  `document:extendXPointersToSentenceSegment()`: that only works when the position sits
-  right after punctuation and returns nothing otherwise, which made the guide give up on
-  real books.)
-- **The underline is not an annotation.** It is drawn through KOReader's
-  *temporary* highlight (`view.highlight.temp` with
-  `view.highlight.temp_drawer = "underscore"`), the same mechanism dictionary
-  lookups use. Temporary highlights are painted on screen and never written to
-  the document settings, so **nothing this plugin draws can show up in the
-  bookmark/annotation list**, and nothing is added to your highlights when you
-  export them later.
-- **Pacing** is the reading time of the sentence plus the pauses a reader
-  naturally takes:
+How it works: one call to `document:getTextFromPositions()` returns the whole visible text
+plus the screen box of every line. The text is split into sentences in plain Lua, each
+sentence is mapped onto the lines it covers, and the underline is drawn from those boxes
+through KOReader's temporary highlight -- so nothing is ever written to the annotation
+store. Sentences follow one another with a delay derived from the same reading speed the
+whole-page mode uses.
 
-  ```
-  delay = characters / speed * 60
-        + commas × 0.15 s + semicolons × 0.25 s + dashes × 0.15 s
-        + (sentence ends ? 0.4 s)
-        + (paragraph ends ? 0.6 s)
-  ```
+Known limits, documented rather than hidden:
 
-  with a floor of *Min. sentence time* (0.8 s by default) — without it a page of
-  short dialogue lines would race past. *Punctuation pause* scales all the
-  punctuation terms at once (0 disables them, 2 doubles them).
-- **Scrolling**: when the current sentence would drop below about 2/3 of the
-  usable height (or has gone off the top), the view scrolls so that the sentence
-  sits about 1/3 from the top, always leaving text visible underneath it.
-- **Manual control**: bind *AutoWords: next sentence*, *AutoWords: previous
-  sentence* and *AutoWords: pause/resume* to gestures to drive the guide by hand.
-  Touching the screen restarts the countdown for the current sentence, and pausing
-  keeps the underline where it is, so you can look away without losing your place.
-
-## Known limitations
-
-1. **No PDF / DJVU / image documents.** The text cannot be measured there; the plugin
-   detects it and refuses to start rather than guessing.
-2. **Top status bar only exists in paged mode** and only when KOReader's *Alt status bar*
-   is enabled; crengine does not draw it in scroll mode.
-3. The count is the **visible area**: in two-column mode that is both columns, and a
-   running header or page number inside the text flow is counted too.
-4. If the text extraction returns nothing (image-only page, document still laying out),
-   the count is 0 and the *minimum delay* applies — the plugin never stalls.
-5. **Menus and dialogs pause the turning**: while another window is on top, AutoWords
-   retries every 2 s instead of turning pages behind your menu.
-6. The reading speed is a single number — calibrate it once with *Calibrate on this page*
-   and it will fit your language and typography; the default 300 units/min is a guess.
-7. Localization of the readings themselves (KOReader needs `.po` catalogues, which a
-   user-side plugin cannot install) is done with a small in-tree table for Simplified
-   Chinese, falling back to KOReader's own translations everywhere else.
-
-8. **The sentence guide needs a reflowable document** (it relies on crengine sentence
-   xpointers); PDF and DJVU are refused in that mode.
-9. The underline moves every few seconds and is repainted partially; on e-ink, ghosting can
-   show up — raising *Min. sentence time* helps a lot.
-10. Dictionary lookups and text selection use the same temporary highlight and briefly cover
-    the underline; it comes back afterwards.
-
-## Troubleshooting
-
-**The icon does not show up.** Open *More settings → Diagnostics*. It lists, among others:
-
-- `Plugin loaded`, `Running` — has the plugin been started at all?
-- `Icon position` — is it set to *Top* while the Alt status bar is off?
-- `Status bar found` / `Status bar visible` — is the bottom bar there and shown?
-- `Alt status bar (top)` — is KOReader's Alt status bar enabled for this document?
-- `Status bar content registered` / `Alt status bar content registered` — did the
-  registration succeed?
-- `Text on this page` — did the text measurement return anything?
-
-**The bottom status bar changed or looks wrong.** KOReader's `addAdditionalFooterContent()`
-recomputes the bar's mode the first time it is used (see *How it works*). Keep *Icon
-position* on **Top**, or uncheck *External content* in KOReader's status-bar settings.
-
-**Pages turn too early / too late.** Use *Calibrate on this page* on a typical page, and
-check *Counting mode*: a page of English prose counted in *characters* gives roughly five
-times the number of *words*.
-
-## Development
-
-The plugin is plain Lua, and the test suite runs offline — no device, no KOReader
-required. It loads the real `main.lua`, `autowords_count.lua` and `autowords_guide.lua`
-with stubbed KOReader modules and checks counting, delay math, the scheduling state
-machine, the lifecycle hooks, every dialog, the status-bar registration, and the sentence
-guide (punctuation classification, sentence boundaries, pacing, underline and scrolling).
-
-```
-python -m pip install lupa      # test runner only; the plugin itself has no dependencies
-python tests/run_tests.py
-```
-
-Current status: **262 checks, 0 failures**.
-
-```
-.                            # the repository root is the plugin directory
-├── _meta.lua                # plugin metadata
-├── main.lua                 # timing, page turning, menu, dialogs, status-bar wiring
-├── autowords_count.lua      # dependency-free UTF-8 counting
-├── autowords_guide.lua      # sentence guide: stepping, underline, pacing, scrolling
-├── autowords_i18n.lua       # UI strings (Chinese table + KOReader gettext)
-└── tests/                   # not installed, development only
-    ├── run_tests.py         # runner (lupa)
-    └── test_autowords.lua   # the tests themselves
-```
+- a sentence that spans two pages is underlined only over the part on screen;
+- sentence detection is punctuation based, so a full stop inside quotes or an abbreviation
+  can cut a sentence in the wrong place;
+- if the text lines and the line boxes do not line up on a document, the guide falls back
+  to underlining one line at a time;
+- it depends on KOReader's temporary-highlight internals, so a future KOReader release
+  could break it.
 
 ### Verification status
 

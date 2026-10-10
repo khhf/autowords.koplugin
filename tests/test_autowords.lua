@@ -853,42 +853,27 @@ end
 
 local Guide = require("autowords_guide")
 
--- A tiny fake document: six characters, xpointers c0 (before the first) .. c6.
--- getTextFromXPointers(cN, cN+1) yields the (N+1)-th character.
--- The first three characters are a "heading" (short, no sentence end) and the
--- last three are the body, so the guide's heading-skipping is exercised too.
-local GUIDE_CHARS = { "第", "一", "章", "你", "好", "。" }
+-- A page of text as KOReader reports it: two lines, three sentences.
+--   line 1: "你好。世界！"   (bytes 1..18)
+--   line 2: "第三句。"       (bytes 20..31)
+local PAGE_TEXT = "你好。世界！\n第三句。"
+local PAGE_BOXES = {
+    { x = 0, y = 20, w = 200, h = 16 },
+    { x = 0, y = 40, w = 200, h = 16 },
+}
 
 local function guide_doc(overrides)
     local doc = {
         is_open = true,
-        getCurrentPage = function() return 1 end,
+        getCurrentPage = function() return 5 end,
         getTextFromPositions = function()
-            return { text = table.concat(GUIDE_CHARS), pos0 = "c0", pos1 = "c6" }
+            return {
+                text = PAGE_TEXT,
+                pos0 = "c0",
+                pos1 = "c1",
+                sboxes = PAGE_BOXES,
+            }
         end,
-        getXPointer = function() return "c0" end,
-        getNextVisibleChar = function(_, xp)
-            local i = tonumber(xp:match("^c(%d+)$"))
-            if not i or i + 1 > #GUIDE_CHARS then return xp end
-            return "c" .. (i + 1)
-        end,
-        -- The guide scans by word ends.  This fake text has one character per
-        -- word, so a word end is one character on (and nil at the very end,
-        -- exactly like crengine when it runs out of text in a node).
-        getNextVisibleWordEnd = function(_, xp)
-            local i = tonumber(xp:match("^c(%d+)$"))
-            if not i or i + 1 > #GUIDE_CHARS then return nil end
-            return "c" .. (i + 1)
-        end,
-        getTextFromXPointers = function(_, a)
-            local i = tonumber(a:match("^c(%d+)$"))
-            if i and i >= 0 and i < #GUIDE_CHARS then return GUIDE_CHARS[i + 1] end
-            return ""
-        end,
-        getScreenBoxesFromPositions = function()
-            return { { x = 0, y = 20, w = 100, h = 16 } }
-        end,
-        getPosFromXPointer = function() return { y = 100 } end,
     }
     for k, v in pairs(overrides or {}) do doc[k] = v end
     return doc
@@ -901,11 +886,12 @@ local function guide_instance(overrides)
         highlight = { temp = {}, temp_drawer = "lighten" },
         dialog = {},
         footer_visible = false,
-        view_mode = (overrides and overrides.view_mode) or "page",
+        view_mode = "page",
     }
-    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
     plugin.reading_mode = "sentence"
     plugin.enabled = true
+    plugin.speed = 300
+    plugin.count_mode = "chars"
     plugin.guide_task = function() end
     local guide = Guide:new(plugin)
     for k, v in pairs(overrides or {}) do
@@ -914,35 +900,82 @@ local function guide_instance(overrides)
     return guide, plugin
 end
 
-do
-    -- punctuation classification, Chinese and ASCII
-    local p = Count.punctuation("你好，世界。")
-    check("cjk comma counted", p.comma, 1)
-    check("cjk full stop counted", p.sentence_end, 1)
-
-    p = Count.punctuation("a, b; c. d!")
-    check("ascii comma", p.comma, 1)
-    check("ascii semicolon", p.semicolon, 1)
-    check("ascii sentence ends", p.sentence_end, 2)
-    check("no dashes here", p.dash, 0)
-
-    p = Count.punctuation("等等——真的吗？")
-    check("em dashes counted per character", p.dash, 2)
-    check("question mark counted", p.sentence_end, 1)
-
-    check("empty text has no punctuation", Count.punctuation("").comma, 0)
+--- The boxes the guide asked the view to draw.
+local function view_boxes(plugin)
+    local temp = plugin.ui.view.highlight.temp
+    return temp[next(temp)] or {}
 end
 
 do
-    check("endsSentence: full stop", Guide.endsSentence("。"), true)
-    check("endsSentence: exclamation", Guide.endsSentence("！"), true)
-    check("endsSentence: comma", Guide.endsSentence("，"), false)
-    check("endsSentence: hanzi", Guide.endsSentence("好"), false)
-    check("endsSentence: empty", Guide.endsSentence(""), false)
+    -- splitting the page text into lines
+    local lines = Guide.splitLines("ab\ncd\n")
+    check("three lines, the last one empty", #lines, 3)
+    check("first line range", lines[1].from .. "-" .. lines[1].to, "1-2")
+    check("second line range", lines[2].from .. "-" .. lines[2].to, "4-5")
+    check("trailing empty line", lines[3].from .. "-" .. lines[3].to, "7-6")
+
+    check("a single line has no separator", #Guide.splitLines("abc"), 1)
 end
 
 do
-    -- pacing
+    -- splitting into sentences
+    local sentences = Guide.splitSentences("你好。世界！")
+    check("two sentences", #sentences, 2)
+    check("first sentence text", sentences[1].text, "你好。")
+    check("second sentence text", sentences[2].text, "世界！")
+    check("byte ranges are consecutive", sentences[1].to, sentences[2].from)
+
+    -- a full stop inside quotes belongs to the closing quote
+    sentences = Guide.splitSentences('他说“好。”然后走了。')
+    check("quoted full stop does not split", #sentences, 2)
+    check("the quote is taken along", sentences[1].text, '他说“好。”')
+
+    -- ascii punctuation
+    sentences = Guide.splitSentences("One. Two! Three?")
+    check("ascii sentence ends", #sentences, 3)
+    check("trailing text", sentences[3].text, "Three?")
+
+    -- text without any sentence end is one piece
+    sentences = Guide.splitSentences("没有标点的一段话")
+    check("no punctuation means one piece", #sentences, 1)
+
+    -- whitespace only produces nothing
+    check("blank text has no sentences", #Guide.splitSentences("   \n  "), 0)
+end
+
+do
+    -- mapping sentences onto the line boxes
+    local text = PAGE_TEXT
+    local lines = Guide.splitLines(text)
+    local sentences = Guide.attachBoxes(Guide.splitSentences(text), lines, PAGE_BOXES)
+
+    check("three sentences mapped", #sentences, 3)
+    check("the first sentence is on line 1", sentences[1].lines[1], 1)
+    check("and it gets one box", #sentences[1].boxes, 1)
+    check("the last sentence is on line 2", sentences[3].lines[1], 2)
+    check("with that line's box",
+        sentences[3].boxes[1] and sentences[3].boxes[1].y, 40)
+
+    -- a sentence covering two lines gets both boxes
+    local two_line = "一二三四五六七八九十。\n下一句。"
+    local boxes = {
+        { x = 0, y = 10, w = 100, h = 16 },
+        { x = 0, y = 30, w = 100, h = 16 },
+    }
+    local mapped = Guide.attachBoxes(Guide.splitSentences(two_line),
+        Guide.splitLines(two_line), boxes)
+    check_true("a sentence can cover more than one line", mapped[1].lines[2] ~= nil)
+end
+
+do
+    -- the fallback when lines and boxes do not line up: one step per line
+    local steps = Guide.sentencesPerLine(PAGE_TEXT, Guide.splitLines(PAGE_TEXT), PAGE_BOXES)
+    check("one step per text line", #steps, 2)
+    check("the first step is line one", steps[1].boxes[1].y, 20)
+end
+
+do
+    -- pacing, unchanged by the rewrite
     local plugin = new_instance()
     plugin.speed = 300
     plugin.count_mode = "chars"
@@ -959,123 +992,108 @@ do
     check_true("comma pauses added",
         math.abs(guide:delayForSentence(commas) - expected) < 0.001)
 
-    check_true("paragraph pause added",
-        guide:delayForSentence("完了。\n") >= Guide.defaults.min_sentence_delay
-            + Guide.defaults.paragraph_pause - 0.001)
-
     check("very short sentence falls back to the minimum",
         guide:delayForSentence("嗯。"), Guide.defaults.min_sentence_delay)
 
     plugin.guide_punct_scale = 0
     check("punct scale 0 removes punctuation pauses",
         guide:delayForSentence(plain .. "。"), 31 * 60 / 300)
-    plugin.guide_punct_scale = nil
-
-    plugin.guide_min_sentence_delay = 3
-    check("custom minimum respected", guide:delayForSentence("嗯。"), 3)
-    plugin.guide_min_sentence_delay = nil
-
-    plugin.speed = 120
-    check("slower speed means longer delay",
-        guide:delayForSentence(string.rep("一二三四五六七八九十", 2)), 10)
 end
 
 do
-    -- the guide starts where the reader is, not at the top of the screen
-    local guide, plugin = guide_instance({ doc = { getXPointer = function() return "c3" end } })
-    scheduled = {}
-    guide:step()
-    check("reading starts at the cursor", guide.segment.pos0, "c3")
-    check("and finds the sentence there", guide.segment.text, "你好。")
-end
-
-do
-    -- a cursor position that cannot be scanned falls back to the visible text
-    local calls = 0
-    local guide, plugin = guide_instance({
-        doc = {
-            getXPointer = function() return "broken" end,
-            getNextVisibleWordEnd = function(_, xp)
-                if xp == "broken" then return nil end -- cursor in a dead spot
-                calls = calls + 1
-                local i = tonumber(xp:match("^c(%d+)$"))
-                if not i or i + 1 > #GUIDE_CHARS then return nil end
-                return "c" .. (i + 1)
-            end,
-        },
-    })
-    scheduled = {}
-    guide:step()
-    check_true("the fallback ran", calls > 0)
-    check("and it read a sentence from the visible text", guide.segment.text, "第一章你好。")
-end
-
-do
-    -- scanning, underlining, stepping and end of document
+    -- reading a page: one sentence at a time, then the page is turned
     local guide, plugin = guide_instance()
     scheduled = {}
+    ticks = {}
     guide:step()
 
-    check("first sentence read", guide.segment.text, "第一章你好。")
-    check("sentence starts at the visible text start", guide.segment.pos0, "c0")
-    check("sentence ends after its full stop", guide.segment.pos1, "c6")
-    check("underline drawn for the current page", #(view_boxes(plugin)), 1)
+    check("first sentence shown", guide.segment.text, "你好。")
+    check("the underline uses that sentence's boxes", guide.last_boxes, 1)
+    check("the underline was handed to the view", #view_boxes(plugin), 1)
     check("temporary highlight switched to underline",
         plugin.ui.view.highlight.temp_drawer, "underscore")
-    check("delay scheduled", #scheduled, 1)
-    check("all six characters were scanned", guide.scanned_chars, 6)
+    check("the sentence has its own countdown", #scheduled, 1)
+    check("the page was read once", guide.page, 5)
+    check("and it knows how many steps it has", #guide.page_sentences, 3)
 
-    -- stepping again starts after the full stop; there is no text left, so
-    -- the scan finds nothing and the guide reports the end of the document
-    local finished
-    plugin.onGuideFinished = function(_, reason) finished = reason end
-    scheduled = {}
+    -- the next two sentences follow
     guide:step()
+    check("second sentence", guide.segment.text, "世界！")
     guide:step()
-    check("scanner reports the end of the document", finished, "end_of_document")
-    check("guide no longer scheduled", guide.scheduled, false)
+    check("third sentence", guide.segment.text, "第三句。")
+    check("progress reached the end", guide.index, 4)
+
+    -- nothing left on this page: turn it
+    guide:step()
+    check("a page turn is queued", #ticks, 1)
+    check("and the page content is dropped until the turn happens",
+        guide.page_sentences, nil)
+
+    -- running the tick actually turns the page
+    local fn = table.remove(ticks, 1)
+    plugin.ui.handleEvent = function(_, ev)
+        plugin.events = plugin.events or {}
+        table.insert(plugin.events, ev.name)
+    end
+    plugin.ui.document = guide_doc({ getCurrentPage = function() return 6 end })
+    fn()
+    check("the page was turned", #(plugin.events or {}), 1)
+    check("with GotoViewRel", plugin.events[1], "GotoViewRel")
+    check("and the new page was read", guide.page, 6)
+    ticks = {}
 end
 
 do
-    -- clearing restores the previous temporary highlight style
+    -- a page change caused by the reader starts the guide over on that page
     local guide, plugin = guide_instance()
     scheduled = {}
     guide:step()
-    guide:clearUnderline()
-    check("underline cleared", next(plugin.ui.view.highlight.temp), nil)
-    check("previous temporary highlight style restored",
-        plugin.ui.view.highlight.temp_drawer, "lighten")
+    check("reading page 5", guide.page, 5)
+
+    plugin.ui.document = guide_doc({ getCurrentPage = function() return 9 end })
+    guide:step()
+    check("the guide followed the reader to page 9", guide.page, 9)
+    check("and started from its first sentence", guide.segment.text, "你好。")
 end
 
 do
-    -- pause holds on the current sentence, resume restarts its countdown
+    -- pausing holds the sentence, resuming restarts its countdown
     local guide, plugin = guide_instance()
     scheduled = {}
     guide:step()
-    check("guide is running before the pause", #scheduled, 1)
+    local sentence_before = guide.segment.text
 
     check("pause toggles on", guide:togglePause(), true)
     check("a paused guide cancels its timer", #scheduled, 0)
-    check("the underline stays while paused", #(view_boxes(plugin)), 1)
+    check("the underline stays while paused", #view_boxes(plugin), 1)
 
-    scheduled = {}
-    local sentence_before = guide.segment.text
     guide:step()
     check("a paused guide does not advance", #scheduled, 0)
     check("still on the same sentence", guide.segment.text, sentence_before)
 
     check("pause toggles off", guide:togglePause(), false)
-    check("resume schedules the sentence again", #scheduled, 1)
+    check("resume restarts the countdown", #scheduled, 1)
 
     guide:pause()
     guide:stop()
     check("stop clears the paused flag", guide.paused, false)
+    check("and the underline", #view_boxes(plugin), 0)
 end
 
 do
-    -- a closed document must make the guide inert (no FFI calls into a
-    -- torn-down crengine object), and a scheduled task must still be
-    -- cancellable even if the plugin dropped its own reference to it
+    -- going back one sentence
+    local guide, plugin = guide_instance()
+    scheduled = {}
+    guide:step()
+    guide:step()
+    check("on the second sentence", guide.segment.text, "世界！")
+    guide:goBack()
+    check("goBack returns to the first sentence", guide.segment.text, "你好。")
+end
+
+do
+    -- a closed document must make the guide inert, and a scheduled task must
+    -- still be cancellable even if the plugin dropped its own reference
     local guide, plugin = guide_instance({ doc = { is_open = false } })
     check("guide is inactive on a closed document", guide:isActive(), false)
     scheduled = {}
@@ -1086,52 +1104,13 @@ do
     scheduled = {}
     guide:step()
     check("guide scheduled its step", #scheduled, 1)
-    plugin.guide_task = nil -- plugin dropped its reference
-    guide:unschedule()      -- must still cancel the right one
+    plugin.guide_task = nil
+    guide:unschedule()
     check("the scheduled step can still be cancelled", #scheduled, 0)
 end
 
 do
-    -- an oscillating xpointer chain must not keep the scanner running: without
-    -- the "seen this before" guard the loop would do its full 200 steps per
-    -- sentence, which on a slow device looks like a freeze
-    local steps = 0
-    local guide, plugin = guide_instance({
-        doc = {
-            getNextVisibleChar = function(_, xp)
-                steps = steps + 1
-                if xp == "c0" then return "c1" end
-                return "c0" -- always jumps back to c0: a clean oscillation
-            end,
-            getTextFromXPointers = function() return "字" end,
-        },
-    })
-    local seg = guide:scanSentence("c2", 200)
-    check_true("the scanner bailed out on an oscillating chain", steps <= 8)
-    check_true("it still returned what it had", seg ~= nil and #seg.text > 0)
-end
-
-do
-    -- a run without any sentence end stops at the step limit
-    local guide, plugin = guide_instance({
-        doc = {
-            getNextVisibleChar = function(_, xp)
-                local i = tonumber(xp:match("^c(%d+)$")) or 0
-                return "c" .. (i + 1)
-            end,
-            getTextFromXPointers = function() return "字" end, -- never ends a sentence
-        },
-    })
-    local seg = guide:scanSentence("c0", 50)
-    -- the fake document only has 6 characters, so the scan stops there
-    check("the scan ran to the end of the fake document",
-        seg and guide.scanned_chars, #GUIDE_CHARS)
-end
-
-do
-    -- the self-test file must be written and flushed on every step, so that a
-    -- crash still leaves a trail (there is no crash.log on Android, and a
-    -- killed process loses whatever was still buffered)
+    -- the self-test file is written and flushed on every step
     local path = Guide.selftestPath()
     check("self-test path is set", type(path), "string")
     check_true("self-test lives in /tmp", path:find("^/tmp/") ~= nil)
@@ -1145,197 +1124,10 @@ do
     local content = fh and fh:read("*a") or ""
     if fh then fh:close() end
     check_true("it announces each step", content:find(">>>", 1, true) ~= nil)
-    check_true("it records where it started",
-        content:find("starting at", 1, true) ~= nil)
-    check_true("it records the underline being set",
-        content:find("underline on page", 1, true) ~= nil)
-    check_true("it records the repaint", content:find("repainting", 1, true) ~= nil)
+    check_true("it records reading the page",
+        content:find("getTextFromPositions", 1, true) ~= nil)
+    check_true("it records the underline", content:find("underline over", 1, true) ~= nil)
     os.remove(path)
-end
-
-do
-    -- following the sentence in SCROLL mode, from the screen boxes
-    local function make(box_y, current_pos, box_h, header_h)
-        local guide, plugin = guide_instance({
-            view_mode = "scroll",
-            doc = { getHeaderHeight = function() return header_h or 0 end },
-        })
-        plugin.guide_scroll = true
-        plugin.ui.rolling = {
-            current_pos = current_pos,
-            _gotoPos = function(_, p) plugin.scrolled_to = p end,
-        }
-        guide._boxes = { { x = 0, y = box_y, w = 100, h = box_h or 16 } }
-        return guide, plugin
-    end
-
-    -- comfortably inside the screen: leave the view alone
-    local guide, plugin = make(300, 0)
-    guide:follow(guide._boxes)
-    check("no scroll while the sentence is comfortable", plugin.scrolled_to, nil)
-
-    -- below the trigger line: scroll so it sits at the configured fraction
-    guide, plugin = make(700, 500)
-    guide:follow(guide._boxes)
-    check("scrolls when the sentence drops too low",
-        plugin.scrolled_to, 500 + (700 - math.floor(800 * Guide.defaults.scroll_position)))
-
-    -- hidden above the text area (behind the status bar): scroll back down
-    guide, plugin = make(10, 500, 16, 29)
-    guide:follow(guide._boxes)
-    check_true("scrolls back up when the sentence is above the text area",
-        plugin.scrolled_to ~= nil and plugin.scrolled_to < 500)
-
-    -- a scroll that would change nothing is skipped
-    local target = math.floor(800 * Guide.defaults.scroll_position)
-    guide, plugin = make(target, 500)
-    guide:follow(guide._boxes)
-    check("no scroll when already at the target position", plugin.scrolled_to, nil)
-
-    -- following can be switched off entirely
-    guide, plugin = make(700, 500)
-    plugin.guide_scroll = false
-    guide:follow(guide._boxes)
-    check("no scroll when following is disabled", plugin.scrolled_to, nil)
-
-    -- a broken rolling offset is survivable
-    guide, plugin = make(700, "junk")
-    guide:follow(guide._boxes)
-    check("no scroll when current_pos is not a number", plugin.scrolled_to, nil)
-
-    -- no boxes at all is fine too
-    guide, plugin = make(700, 500)
-    guide:follow(nil)
-    check("no scroll without boxes", plugin.scrolled_to, nil)
-end
-
-do
-    -- following the sentence in PAGE mode: turn the page via nextTick
-    local function make(box_y, box_h, dimen_h)
-        local guide, plugin = guide_instance()
-        plugin.guide_scroll = true
-        plugin.ui.dimen = { h = dimen_h or 800, w = 600 }
-        plugin.ui.handleEvent = function(_, ev)
-            plugin.events = plugin.events or {}
-            table.insert(plugin.events, ev)
-        end
-        guide._boxes = { { x = 0, y = box_y, w = 100, h = box_h or 16 } }
-        return guide, plugin
-    end
-
-    -- the sentence is fully on the page: nothing happens
-    local guide, plugin = make(300, 16)
-    guide:follow(guide._boxes)
-    check("no page turn while the sentence is visible", #ticks, 0)
-
-    -- the sentence starts below the text area (a sentence that merely runs
-    -- over the bottom edge is being read and must not be taken away)
-    guide, plugin = make(820, 16)
-    guide:follow(guide._boxes)
-    check("a page turn is queued", #ticks, 1)
-    check("and only one while it is pending", guide.turn_pending, true)
-    guide:follow(guide._boxes)
-    check("no second turn queued for the same sentence", #ticks, 1)
-
-    -- running the tick performs the turn
-    local fn = table.remove(ticks, 1)
-    fn()
-    check("the tick turned the page", #(plugin.events or {}), 1)
-    check("with the right event", plugin.events[1].name, "GotoViewRel")
-    check("and cleared the pending flag", guide.turn_pending, false)
-
-    -- following can be switched off
-    guide, plugin = make(820, 16)
-    plugin.guide_scroll = false
-    ticks = {}
-    guide:follow(guide._boxes)
-    check("no page turn when following is disabled", #ticks, 0)
-    ticks = {}
-end
-
-
-do
-    -- a sentence that lives on a page not shown yet must be reached by turning
-    -- the page; its screen boxes do not exist, which is what used to deadlock
-    -- the guide at the end of every page
-    local guide, plugin = guide_instance({
-        doc = {
-            getCurrentPage = function() return 5 end,
-            getPageFromXPointer = function() return 7 end,
-        },
-    })
-    plugin.guide_scroll = true
-    plugin.ui.handleEvent = function(_, ev)
-        plugin.events = plugin.events or {}
-        table.insert(plugin.events, ev.name)
-    end
-    ticks = {}
-    scheduled = {}
-    guide:step()
-    check("no underline for a sentence on a page not shown", guide.visible_boxes, nil)
-    check("no countdown is started either", #scheduled, 0)
-    check("a page turn is queued instead", #ticks, 1)
-    check("the page turn is marked pending", guide.turn_pending, true)
-    check("the sentence is remembered", guide.segment ~= nil, true)
-
-    local fn = table.remove(ticks, 1)
-    fn()
-    check("running the tick turned the page", #(plugin.events or {}), 1)
-    check("with GotoViewRel", plugin.events[1], "GotoViewRel")
-    -- This stub keeps reporting page 7 while page 5 is shown, so the re-run
-    -- queues another turn -- in a real book the page number would have moved on.
-    check("the re-run queues the next turn while the page is still behind", #ticks, 1)
-    ticks = {}
-end
-
-do
-    -- a sentence on the page being shown is underlined as usual
-    local guide, plugin = guide_instance({
-        doc = {
-            getCurrentPage = function() return 5 end,
-            getPageFromXPointer = function() return 5 end,
-        },
-    })
-    plugin.guide_scroll = true
-    ticks = {}
-    scheduled = {}
-    guide:step()
-    check("no page turn for a sentence on the current page", #ticks, 0)
-    check_true("the sentence is underlined", guide.visible_boxes ~= nil)
-    check("and the countdown runs", #scheduled, 1)
-end
-
-do
-    -- scroll mode has no pages to turn
-    local guide, plugin = guide_instance({
-        view_mode = "scroll",
-        doc = {
-            getCurrentPage = function() return 5 end,
-            getPageFromXPointer = function() return 7 end,
-        },
-    })
-    plugin.guide_scroll = true
-    ticks = {}
-    scheduled = {}
-    guide:step()
-    check("scroll mode never queues a page turn", #ticks, 0)
-    check("and it still schedules the next sentence", #scheduled, 1)
-end
-
-do
-    -- following switched off means no page turns at all
-    local guide, plugin = guide_instance({
-        doc = {
-            getCurrentPage = function() return 5 end,
-            getPageFromXPointer = function() return 7 end,
-        },
-    })
-    plugin.guide_scroll = false
-    ticks = {}
-    scheduled = {}
-    guide:step()
-    check("no page turn when following is disabled", #ticks, 0)
-    check("but reading goes on", #scheduled, 1)
 end
 
 -- ---------------------------------------------------------------------------

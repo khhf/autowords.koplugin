@@ -1,25 +1,31 @@
 --[[--
-Sentence-by-sentence reading guide for AutoWords.
+AutoWords sentence guide: underline the sentence being read, one at a time.
 
-Instead of turning pages, this mode walks the text one sentence at a time and
-keeps a single underline under the sentence being read, moving it down as the
-reader progresses.
+How it works (and why it is built this way)
+-------------------------------------------
+The guide handles one page at a time and never keeps a position across pages:
 
-It is deliberately non-invasive:
+  1. a single call to document:getTextFromPositions() returns the whole visible
+     text, the screen box of every line, and the start/end xpointers;
+  2. the text is split into sentences in plain Lua.  No per-character calls into
+     crengine: an earlier version scanned character by character and needed
+     hundreds of FFI calls per sentence, which is far too slow on a Kindle;
+  3. each sentence is mapped onto the lines it covers, and the underline is
+     drawn from those line boxes -- the same mechanism KOReader uses for a
+     temporary highlight, so nothing is ever written to the annotation store;
+  4. sentences follow one another with a delay derived from the configured
+     reading speed.  It is the same speed the whole page mode uses, so the two
+     stay in step by construction;
+  5. once the last sentence of the page has had its time, the page is turned.
 
-* The underline uses KOReader's *temporary* highlight -- view.highlight.temp
-  with view.highlight.temp_drawer = "underscore".  Temporary highlights are
-  painted on screen and never written to the document settings, so nothing this
-  plugin draws can show up in the bookmark/annotation list.
-* Sentence boundaries come from crengine itself,
-  document:extendXPointersToSentenceSegment() -- the same call KOReader uses for
-  its "extend selection to sentence" action.  No regex sentence splitting.
-* The delay before moving on is the reading time of the sentence plus the
-  pauses a reader naturally takes at punctuation and at paragraph ends,
-  floored by a minimum so a page of short dialogue lines does not race past.
+Known limits, documented rather than hidden:
 
-Only crengine documents (EPUB, FB2, TXT ...) are supported: PDF has no
-sentence xpointers, and the guide is a no-op there.
+  * a sentence that spans two pages is underlined only over the part shown;
+  * sentence detection is punctuation based, so a full stop inside quotes or an
+    abbreviation can cut a sentence in the wrong place;
+  * every sentence costs a (partial) screen refresh.  On e-ink that is the real
+    price of this mode -- it draws noticeably more power than plain page
+    turning -- so it is off by default and the menu says so.
 ]]
 
 local Count = require("autowords_count")
@@ -37,11 +43,11 @@ Guide.defaults = {
     comma_pause = 0.15,
     semicolon_pause = 0.25,
     dash_pause = 0.15,
-    end_pause = 0.4,           -- added once per sentence end (max twice)
-    paragraph_pause = 0.6,     -- the sentence ends with a line/paragraph break
-    punct_scale = 1.0,         -- scales all the punctuation pauses at once
-    scroll_position = 0.33,    -- keep the current sentence at this fraction of the usable height
-    scroll_trigger = 0.66,     -- scroll once it would fall below this fraction
+    end_pause = 0.4,
+    paragraph_pause = 0.6,
+    punct_scale = 1.0,         -- scales every punctuation pause at once
+    scroll_position = 0.33,    -- (kept for scroll mode)
+    scroll_trigger = 0.66,
 }
 
 function Guide:new(plugin)
@@ -49,11 +55,11 @@ function Guide:new(plugin)
         plugin = plugin,
         scheduled = false,
         paused = false,
-        history = nil,        -- xpointers of the sentences shown, for goBack()
-        turn_pending = false, -- a page turn is already queued
-        visible_boxes = nil,  -- screen boxes of the current sentence
-        xp = nil,             -- xpointer the next sentence starts at
-        segment = nil,        -- { text, pos0, pos1 } of the current sentence
+        turn_pending = false,   -- a page turn is already queued
+        page = nil,             -- page number the sentences below belong to
+        page_sentences = nil,   -- { { text, boxes, from, to }, ... } of that page
+        index = 1,              -- which sentence of the page is current
+        segment = nil,          -- the sentence being shown
         saved_temp_drawer = nil,
     }, self)
 end
@@ -66,19 +72,16 @@ function Guide:setting(name)
     return value
 end
 
---- Where the self-test trace is written.
----
---- Kept in /tmp because that directory exists and is writable on every platform
---- KOReader runs on (Linux, Android, Kindle, Kobo), and because on Android the
---- app data directory is awkward to get at from a PC.  If /tmp cannot be
---- written, the plugin falls back to the KOReader settings directory.
+-- ---------------------------------------------------------------------------
+-- Self-test file
+--
+-- Android builds and minimal Docker images have no crash.log, and stdout is
+-- lost when the process is killed, so every step is written to a file and
+-- flushed immediately.  The Diagnostics dialog shows the same lines.
+-- ---------------------------------------------------------------------------
+
 local SELFTEST_PATH = "/tmp/autowords-selftest.txt"
 
---- Write one line to the self-test file, flushed immediately.
----
---- Flushing matters: a crash kills the process and anything still sitting in a
---- stdio buffer is lost, which is exactly why "run it with -d and look at the
---- output" never showed us anything.
 local function selftest_write(line)
     local function write_to(path)
         local fh = io.open(path, "a")
@@ -127,12 +130,6 @@ function Guide:stage(fmt, ...)
     end
 end
 
---- Remember a decision: in the log, in a small in-memory buffer, and in the
---- self-test file.
----
---- The buffer feeds the Diagnostics dialog, the file survives a crash -- on
---- Android and in minimal Docker images there is no crash.log to look at, and
---- stdout is buffered away when the process dies.
 function Guide:trace(fmt, ...)
     local line = string.format(fmt, ...)
     logger.dbg("AutoWords guide: " .. line)
@@ -148,18 +145,19 @@ function Guide:trace(fmt, ...)
     end
 end
 
+--- The path of the self-test file, for the Diagnostics dialog.
+function Guide.selftestPath()
+    return SELFTEST_PATH
+end
+
 -- ---------------------------------------------------------------------------
 -- Document support
 -- ---------------------------------------------------------------------------
 
 function Guide:isSupported()
     local ui = self.plugin and self.plugin.ui
-    if not ui or not ui.document or not ui.rolling then return false end
-    local doc = ui.document
-    return doc.getTextFromPositions ~= nil
-        and doc.getNextVisibleChar ~= nil
-        and doc.getTextFromXPointers ~= nil
-        and doc.getScreenBoxesFromPositions ~= nil
+    if not ui or not ui.document then return false end
+    return ui.document.getTextFromPositions ~= nil
 end
 
 function Guide:isActive()
@@ -167,7 +165,7 @@ function Guide:isActive()
     -- Never touch the document through the FFI once it has been closed: a
     -- stray timer callback running after onCloseDocument would be calling into
     -- a torn-down crengine object.
-    if not ui or not ui.document or not ui.rolling then return false end
+    if not ui or not ui.document then return false end
     if ui.document.is_open == false then return false end
     return self.plugin.enabled
         and self.plugin.reading_mode == "sentence"
@@ -206,252 +204,236 @@ function Guide:delayForSentence(text)
 end
 
 -- ---------------------------------------------------------------------------
--- Sentence lookup
---
--- Deliberately NOT document:extendXPointersToSentenceSegment(): it only works
--- when the position sits right after punctuation or whitespace and returns
--- nothing otherwise, and walking back to such a position turned out to be
--- unreliable on real books (40 words back still found nothing on a Chinese
--- novel).  Instead the guide scans forward from the start of the visible text
--- and stops at the first sentence-ending punctuation.  That only uses
--- getTextFromPositions / getNextVisibleChar / getTextFromXPointers, all of
--- which KOReader itself uses.
+-- Splitting the page into sentences (plain Lua, no FFI)
 -- ---------------------------------------------------------------------------
 
---- Where the visible text starts (xpointer of the first word on screen).
--- @treturn string|nil xpointer of the visible text start
-function Guide:visibleStart()
-    local doc = self.plugin.ui.document
-    self:stage("getTextFromPositions (visible area)")
+--- Closing punctuation that belongs to the sentence before it.
+--- So "他说“好。”" ends after the closing quote, not after the full stop.
+local CLOSING = {
+    [0x0022] = true, -- "
+    [0x0027] = true, -- '
+    [0x0029] = true, -- )
+    [0x005D] = true, -- ]
+    [0x007D] = true, -- }
+    [0x2019] = true, -- ’
+    [0x201D] = true, -- ”
+    [0x3009] = true, -- 〉
+    [0x300B] = true, -- 》
+    [0x300D] = true, -- 」
+    [0x300F] = true, -- 』
+    [0x3011] = true, -- 】
+    [0x3015] = true, -- 〕
+    [0xFF09] = true, -- ）
+    [0xFF3D] = true, -- ］
+}
+
+--- Split the page text into lines, as byte ranges (from is 1-based, to is
+--- inclusive).
+-- @tparam string text
+-- @treturn table list of { from, to }
+function Guide.splitLines(text)
+    local lines = {}
+    local start = 1
+    local len = #text
+    for i = 1, len do
+        if text:byte(i) == 10 then -- \n
+            lines[#lines + 1] = { from = start, to = i - 1 }
+            start = i + 1
+        end
+    end
+    lines[#lines + 1] = { from = start, to = len }
+    return lines
+end
+
+--- Split the page text into sentences, as byte ranges (to is exclusive).
+--- Leading whitespace is trimmed off each sentence, so a sentence that starts
+--- after a line break does not carry that break around (it would show up in the
+--- pacing and in the diagnostics).
+-- @tparam string text
+-- @treturn table list of { text, from, to }
+function Guide.splitSentences(text)
+    local sentences = {}
+    local len = #text
+    local start = 1
+    local i = 1
+
+    --- First non-space byte at or after `from`, never past `limit`.
+    local function skipBlanks(from, limit)
+        while from < limit do
+            local cp, nxt = Count.decode(text, from, limit)
+            if not cp or not Count.isWhitespaceCp(cp) then break end
+            from = nxt
+        end
+        return from
+    end
+
+    while i <= len do
+        local cp, nxt = Count.decode(text, i, len)
+        if not cp then break end
+
+        if Count.punctClassOf(cp) == "sentence_end" then
+            -- take any closing punctuation and repeated marks with it
+            local stop = nxt
+            while stop <= len do
+                local cp2, n2 = Count.decode(text, stop, len)
+                if not cp2 then break end
+                if Count.punctClassOf(cp2) == "sentence_end" or CLOSING[cp2] then
+                    stop = n2
+                else
+                    break
+                end
+            end
+            local from = skipBlanks(start, stop)
+            if from < stop then
+                sentences[#sentences + 1] = {
+                    text = text:sub(from, stop - 1),
+                    from = from,
+                    to = stop,
+                }
+            end
+            start = stop
+            i = stop
+        else
+            i = nxt
+        end
+    end
+
+    -- whatever is left over (a paragraph with no sentence end)
+    if start <= len then
+        local from = skipBlanks(start, len + 1)
+        local rest = text:sub(from)
+        if rest:match("%S") then
+            sentences[#sentences + 1] = { text = rest, from = from, to = len + 1 }
+        end
+    end
+
+    return sentences
+end
+
+--- Which lines does each sentence cover, and which boxes belong to them.
+---
+--- The page text and the line boxes come from the same call and line up one to
+--- one, so a sentence's line range gives exactly the boxes to underline.
+-- @tparam table sentences from splitSentences()
+-- @tparam table lines from splitLines()
+-- @tparam table boxes screen boxes, one per line
+-- @treturn table sentences with `boxes` and `lines` filled in
+function Guide.attachBoxes(sentences, lines, boxes)
+    local out = {}
+    for _, sentence in ipairs(sentences) do
+        local first, last
+        for i, line in ipairs(lines) do
+            if sentence.from <= line.to and sentence.to > line.from then
+                if not first then first = i end
+                last = i
+            end
+        end
+
+        local sentence_boxes = {}
+        if first and last then
+            for i = first, last do
+                local box = boxes[i]
+                if box then sentence_boxes[#sentence_boxes + 1] = box end
+            end
+        end
+
+        out[#out + 1] = {
+            text = sentence.text,
+            from = sentence.from,
+            to = sentence.to,
+            lines = { first, last },
+            boxes = sentence_boxes,
+        }
+    end
+    return out
+end
+
+--- Fallback when the text lines and the screen boxes do not line up: underline
+--- one line at a time instead of one sentence at a time.
+-- @tparam string text the page text
+-- @tparam table lines from splitLines()
+-- @tparam table boxes screen boxes
+function Guide.sentencesPerLine(text, lines, boxes)
+    local out = {}
+    local count = math.min(#lines, #boxes)
+    for i = 1, count do
+        local line = lines[i]
+        local line_text = text:sub(line.from, line.to)
+        if line_text:match("%S") then
+            out[#out + 1] = {
+                text = line_text,
+                from = line.from,
+                to = line.to + 1,
+                lines = { i, i },
+                boxes = { boxes[i] },
+            }
+        end
+    end
+    return out
+end
+
+-- ---------------------------------------------------------------------------
+-- Reading the page
+-- ---------------------------------------------------------------------------
+
+--- Read the visible page and split it into sentences.
+-- @treturn boolean true when there is something to read
+function Guide:loadPage()
+    local ui = self.plugin.ui
+    local doc = ui.document
+
+    self:stage("getTextFromPositions (read the visible page)")
     local ok, res = pcall(doc.getTextFromPositions, doc,
         { x = 0, y = 0 },
         { x = Screen:getWidth(), y = Screen:getHeight() },
         true)
-    if not ok then
-        self.last_reason = "call_failed"
-        self:trace("getTextFromPositions failed: %s", tostring(res))
-        return nil
+
+    if not ok or not res or not res.text or res.text == "" then
+        self:trace("cannot read the page text")
+        self.page_sentences = nil
+        return false
     end
-    if not res or not res.pos0 or res.pos0 == "" then
-        self.last_reason = "no_visible_text"
-        return nil
+
+    local page_ok, page = pcall(doc.getCurrentPage, doc)
+    self.page = page_ok and page or nil
+
+    local text = res.text
+    local boxes = res.sboxes or {}
+    local lines = Guide.splitLines(text)
+    self:trace("page %s: %d bytes, %d line(s), %d box(es)",
+        tostring(self.page), #text, #lines, #boxes)
+
+    if #boxes == 0 then
+        self:trace("the page reported no line boxes")
+        self.page_sentences = nil
+        return false
     end
-    -- Show what we are about to scan, so a bad xpointer is visible in the log.
-    local preview = res.text or ""
-    if #preview > 40 then preview = preview:sub(1, 40) .. "…" end
-    preview = preview:gsub("%s+", " ")
-    self:trace("visible text starts at %s: %s", tostring(res.pos0), preview)
-    return res.pos0
+
+    if #lines == #boxes then
+        self.page_sentences = Guide.attachBoxes(Guide.splitSentences(text), lines, boxes)
+    else
+        -- The two do not line up on this document: underline line by line,
+        -- which still follows the reading, just with coarser granularity.
+        self:trace("lines and boxes differ (%d vs %d): going line by line",
+            #lines, #boxes)
+        self.page_sentences = Guide.sentencesPerLine(text, lines, boxes)
+    end
+
+    self.index = 1
+    self:trace("page %s has %d step(s)", tostring(self.page), #self.page_sentences)
+    return #self.page_sentences > 0
 end
 
---- Does this one-character chunk end a sentence?
-function Guide.endsSentence(chunk)
-    if not chunk or chunk == "" then return false end
-    local cp = Count.decode(chunk, 1, #chunk)
-    if not cp then return false end
-    return Count.punctClassOf(cp) == "sentence_end"
-end
-
---- Scan forward from xp until a sentence ends.
--- @tparam string xp start xpointer
--- @tparam[opt=400] number max_chars hard limit, so a paragraph without any
---        punctuation cannot turn into an endless scan
---- Scan forward from xp until a sentence ends.
----
---- Steps by WORD, not by character, and that is not an optimisation:
---- getNextVisibleChar() returns nothing once it reaches the end of the current
---- text node, so a sentence that starts in one node could never be finished
---- (this is exactly what stopped the guide on a chapter title: the title's text
---- node ended, the scan found nothing more, and it looked like end of book).
---- getNextVisibleWordEnd() walks on into the next node, so scanning crosses
---- from a heading into the following paragraph, and from paragraph to paragraph.
----
---- Two safety nets, because a runaway loop here kills the whole reader: the
---- step limit, and a "seen this position before" check.
--- @tparam string xp start xpointer
--- @tparam[opt=400] number max_chars hard limit, so a paragraph without any
---        punctuation cannot turn into an endless scan
--- @treturn table|nil { text, pos0, pos1 }
-function Guide:scanSentence(xp, max_chars)
-    local doc = self.plugin.ui.document
-    local limit = max_chars or 400
-    local parts = {}
-    local seen = {}
-    local cur = xp
-    local count = 0
-    local oscillated = false
-    for i = 1, limit do
-        if i % 25 == 1 then
-            -- heartbeat: if the next call hangs or crashes, the file says how
-            -- far we got
-            self:stage("scanning step %d at %s", i, tostring(cur))
-        end
-        local ok, nxt = pcall(doc.getNextVisibleWordEnd, doc, cur)
-        if not ok or not nxt or nxt == "" then
-            -- no more text in this direction: we are at the end of the book
-            break
-        end
-        if nxt == cur then
-            -- the word-end is the position itself: try one character so a
-            -- single-character word still advances
-            local okc, char_next = pcall(doc.getNextVisibleChar, doc, cur)
-            if not okc or not char_next or char_next == cur or char_next == "" then break end
-            nxt = char_next
-        end
-        if seen[nxt] then
-            oscillated = true
-            break
-        end
-        seen[cur] = true
-        local ok2, chunk = pcall(doc.getTextFromXPointers, doc, cur, nxt)
-        if not ok2 or not chunk or chunk == "" then break end
-        parts[#parts + 1] = chunk
-        count = count + 1
-        cur = nxt
-        if Guide.sentenceEndsIn(chunk) then break end
-    end
-    if oscillated then
-        self:trace("scan stopped advancing at %s", tostring(cur))
-    end
-    if count == 0 then
-        self.last_reason = "no_text_scanned"
-        return nil
-    end
-    self.last_reason = nil
-    self.scanned_chars = count
-    return { pos0 = xp, pos1 = cur, text = table.concat(parts) }
-end
-
---- Start reading at a sensible place.
----
---- Preference order:
----  1. wherever the reader actually is (the cursor), pulled forward to the
----     first real sentence start -- this is what the reader expects;
----  2. the start of the visible text, if the cursor cannot be used.
----
---- Deliberately NOT "the first thing on screen": on a chapter opening that is
---- the heading, and the underline then sits on the title while the body text is
---- never reached.  Guessing headings from their length does not work either --
---- a short body paragraph looks exactly the same -- so the cursor is used.
--- @treturn string|nil position to start reading at
-function Guide:startPosition()
-    local doc = self.plugin.ui.document
-    local ok, here = pcall(doc.getXPointer, doc)
-    if ok and here and here ~= "" then
-        -- step forward to the first sentence end, then continue from there:
-        -- guarantees we begin on a sentence boundary in the reader's own place
-        local seg = self:scanSentence(here, 200)
-        if seg then
-            self:trace("starting at the reading position %s", tostring(here))
-            return here
-        end
-    end
-    local start = self:visibleStart()
-    if start then
-        self:trace("starting at the visible text start")
-    end
-    return start
-end
-
---- The sentence starting at self.xp (at the reading position the first time).
--- @treturn table|nil segment
-function Guide:currentSegment()
-    if not self.xp then
-        self.xp = self:startPosition()
-        if not self.xp then
-            self.stop_reason = "no_position"
-            return nil
-        end
-    end
-
-    -- Keep the first sentences short: a paragraph with no punctuation at all
-    -- would otherwise scan far too long before the underline appears.
-    local seg = self:scanSentence(self.xp, 200)
-    if not seg then
-        -- The cursor may sit in a spot that cannot be scanned (an empty node,
-        -- the very end of a node).  Once, fall back to the visible text start
-        -- instead of declaring the book finished.
-        if not self.tried_visible_fallback then
-            self.tried_visible_fallback = true
-            local start = self:visibleStart()
-            if start and start ~= self.xp then
-                self:trace("retrying from the visible text start")
-                self.xp = start
-                seg = self:scanSentence(self.xp, 200)
-            end
-        end
-    end
-    if not seg then
-        self.stop_reason = "end_of_document"
-        self:trace("nothing to read from %s", tostring(self.xp))
-        return nil
-    end
-    return seg
-end
-
-
---- Does this chunk of scanned text contain a sentence ending?
----
---- Called with the text between two scan steps, which may hold more than one
---- character, so it checks every code point instead of only the first.
-function Guide.sentenceEndsIn(text)
-    if not text or text == "" then return false end
-    local i, len = 1, #text
-    while i <= len do
-        local cp
-        cp, i = Count.decode(text, i, len)
-        if not cp then break end
-        if Count.punctClassOf(cp) == "sentence_end" then return true end
-    end
-    return false
-end
-
---- Does this chunk of scanned text end a paragraph or a line?
-function Guide.paragraphEndsIn(text)
-    if not text or text == "" then return false end
-    return text:find("\n%s*$") ~= nil
-end
-
---- Step over a chapter heading that happens to be the first thing on screen.
----
---- NOTE: not used for the first sentence any more -- telling a heading from a
---- short paragraph by its text alone does not work, and it happily skipped
---- whole body paragraphs.  Kept out of the start path on purpose.
--- @tparam string xp position to start from
--- @treturn string position to start reading at
-function Guide:skipHeading(xp)
-    return xp
-end
-
---- The screen boxes of a segment, one per displayed line.
-function Guide:sentenceBoxes(seg)
-    local doc = self.plugin.ui.document
-    self:stage("getScreenBoxesFromPositions")
-    local ok, boxes = pcall(doc.getScreenBoxesFromPositions, doc, seg.pos0, seg.pos1, true)
-    if not ok then
-        logger.warn("AutoWords guide: getScreenBoxesFromPositions failed:", boxes)
-        return nil
-    end
-    if not boxes or #boxes == 0 then
-        logger.dbg("AutoWords guide: the sentence has no screen boxes")
-        return nil
-    end
-    return boxes
-end
-
--- ---------------------------------------------------------------------------
--- Drawing the underline
--- ---------------------------------------------------------------------------
-
---- Paint the underline under the current sentence.
+--- Paint the underline under the sentence being read.
 --- Uses the temporary highlight, which is never persisted.
-function Guide:showUnderline(seg)
+function Guide:showUnderline(sentence)
     local view = self.plugin.ui.view
     if not view or not view.highlight then return end
-    local boxes = self:sentenceBoxes(seg)
-    -- remember them even on failure, so follow() never works from stale boxes
-    self.visible_boxes = boxes
-    if not boxes then return end
+    local boxes = sentence and sentence.boxes
+    if not boxes or #boxes == 0 then
+        self:trace("no line boxes for this sentence")
+        return
+    end
 
     if self.saved_temp_drawer == nil then
         self.saved_temp_drawer = view.highlight.temp_drawer
@@ -459,12 +441,14 @@ function Guide:showUnderline(seg)
     view.highlight.temp_drawer = "underscore"
 
     local doc = self.plugin.ui.document
-    local page_ok, page = pcall(doc.getCurrentPage, doc)
-    if not page_ok or not page then page = 1 end
+    local ok, page = pcall(doc.getCurrentPage, doc)
+    if not ok or not page then page = self.page or 1 end
     view.highlight.temp = { [page] = boxes }
+
     self.last_boxes = #boxes
-    self:trace("underline on page %s over %d line(s), first at y=%s",
-        tostring(page), #boxes, tostring(boxes[1] and boxes[1].y))
+    self.last_text = sentence.text
+    self:trace("underline over %d line(s) of %d: %s", #boxes, #(sentence.text or ""),
+        (sentence.text or ""):gsub("%s+", " "):sub(1, 40))
     self:stage("repainting the view")
     self:redraw()
 end
@@ -487,92 +471,20 @@ function Guide:redraw()
     UIManager:setDirty(view.dialog or view, "partial")
 end
 
---- The path of the self-test file, for the Diagnostics dialog.
-function Guide.selftestPath()
-    return SELFTEST_PATH
-end
-
 -- ---------------------------------------------------------------------------
--- Following the sentence
---
--- Everything here works from the SCREEN boxes of the sentence -- the same ones
--- the underline is drawn from.  It used to use
--- document:getPosFromXPointer(), which returns a DOCUMENT coordinate (tens of
--- thousands of pixels into the book); comparing that against the screen height
--- made every sentence look like it had fallen off the page, so the guide turned
--- the page over and over and took the reader down with it.
+-- Turning the page
 -- ---------------------------------------------------------------------------
-
---- The vertical range of the screen that text can occupy.
--- @treturn number top edge, @treturn number bottom edge
-function Guide:visibleArea()
-    local ui = self.plugin.ui
-    local view = ui.view
-    local footer_h = 0
-    if view and view.footer_visible and view.footer and view.footer.getHeight then
-        local ok, h = pcall(view.footer.getHeight, view.footer)
-        if ok and type(h) == "number" then footer_h = h end
-    end
-    local header_h = 0
-    local doc = ui.document
-    if doc and doc.getHeaderHeight then
-        local ok, h = pcall(doc.getHeaderHeight, doc)
-        if ok and type(h) == "number" then header_h = h end
-    end
-    return header_h, Screen:getHeight() - footer_h
-end
-
---- Keep the sentence being read on screen.
----
---- Paged mode: the underline can only sit on a page that is showing, so once
---- the sentence drops below the visible page the view moves on.
---- Scroll mode: the sentence is nudged to the configured fraction of the
---- screen.
--- @tparam table boxes screen boxes of the sentence, one per displayed line
-function Guide:follow(boxes)
-    if self.plugin.guide_scroll == false then return end
-    if not boxes or #boxes == 0 then return end
-    local ui = self.plugin.ui
-    local view = ui.view
-    if not view then return end
-
-    local top, bottom = self:visibleArea()
-    if bottom <= top then return end
-
-    local first, last = boxes[1], boxes[#boxes]
-    if type(first.y) ~= "number" or type(last.y) ~= "number" then return end
-    local sentence_top = first.y
-    local sentence_bottom = last.y + (last.h or 0)
-    self.last_sentence_top = sentence_top
-    self.last_sentence_bottom = sentence_bottom
-    self:trace("sentence occupies y=%d..%d, text area is %d..%d",
-        sentence_top, sentence_bottom, top, bottom)
-
-    if (view.view_mode or "page") == "page" then
-        -- Only turn when the sentence STARTS below the visible area.  A
-        -- sentence that merely runs over the bottom edge is the one being read
-        -- right now, and turning the page would take it away mid-read; the
-        -- following sentence triggers the turn instead.
-        if sentence_top < bottom then
-            return
-        end
-        self:turnPage()
-    else
-        self:scrollTo(sentence_top, top, bottom)
-    end
-end
 
 --- Move on to the next page.
 ---
 --- Never synchronously: this runs inside a UIManager timer callback, and turning
 --- the page from there re-enters the layout and the repaint while the timer is
---- still on the stack.  One turn at a time, too -- otherwise a sentence that
---- stays off-page would queue turns forever.
+--- still on the stack.
 -- @tparam[opt] function after called once the turn has been performed
 function Guide:turnPage(after)
     if self.turn_pending then return end
     self.turn_pending = true
-    self:trace("turning the page")
+    self:trace("the page has been read: turning it")
     UIManager:nextTick(function()
         self.turn_pending = false
         if not self:isActive() then return end
@@ -592,73 +504,33 @@ function Guide:turnPage(after)
     end)
 end
 
---- Scroll the sentence to the configured fraction of the screen.
-function Guide:scrollTo(sentence_top, top, bottom)
-    local ui = self.plugin.ui
-    local rolling = ui.rolling
-    if not rolling or not rolling._gotoPos then return end
-
-    local usable_h = bottom - top
-    local trigger = top + usable_h * self:setting("scroll_trigger")
-    if sentence_top >= top and sentence_top <= trigger then
-        return -- comfortably placed
-    end
-
-    -- ReaderRolling's offset and the sentence position are both document
-    -- coordinates, so their difference is what has to move.
-    local current = rolling.current_pos
-    if type(current) ~= "number" then
-        self:trace("not scrolling: current_pos is %s", tostring(current))
-        return
-    end
-    if current <= 0 and sentence_top <= top then
-        self:trace("not scrolling: already at the top of the document")
-        return
-    end
-
-    local target = top + math.floor(usable_h * self:setting("scroll_position"))
-    local new_pos = current + (sentence_top - target)
-    if new_pos < 0 then new_pos = 0 end
-    if new_pos == current then return end
-
-    self:stage("scrolling to %d", new_pos)
-    local ok, err = pcall(rolling._gotoPos, rolling, new_pos, false)
-    if not ok then
-        self:trace("scrolling failed: %s", tostring(err))
-    end
-end
-
-
 -- ---------------------------------------------------------------------------
 -- The loop
 -- ---------------------------------------------------------------------------
 
 function Guide:scheduleIn(delay)
-    -- Remember the exact function reference we schedule, so unscheduling cannot
-    -- miss it if the plugin drops its own reference meanwhile.
-    self.task = self.plugin.guide_task
+    self:unschedule()
+    if not self:isActive() then return end
     self.scheduled = true
+    self.task = function() self:step() end
     UIManager:scheduleIn(delay, self.task)
 end
 
 function Guide:unschedule()
-    if self.scheduled and self.task then
+    if self.task then
         UIManager:unschedule(self.task)
+        self.task = nil
     end
     self.scheduled = false
 end
 
---- Restart the countdown for the sentence on screen (the reader touched the
---- screen, or wants more time on this sentence).
+--- Restart the countdown for the sentence on screen (after a pause).
 function Guide:restartTimer()
-    if not self:isActive() or not self.scheduled then return end
-    local seg = self.segment
-    if not seg then return end
-    self:unschedule()
-    self:scheduleIn(self:delayForSentence(seg.text or ""))
+    local sentence = self.segment
+    if not sentence then return end
+    self:scheduleIn(self:delayForSentence(sentence.text or ""))
 end
 
---- One step: show the current sentence, then schedule the move to the next one.
 function Guide:step()
     self.scheduled = false
     if not self:isActive() then return end
@@ -671,60 +543,42 @@ function Guide:step()
         return
     end
 
-    local seg = self:currentSegment()
-    if not seg then
-        self:finish(self.stop_reason or "end_of_document")
-        return
+    -- The reader may have turned the page (or jumped) themselves: start over on
+    -- whatever is on screen now.
+    local doc = self.plugin.ui.document
+    local ok, page = pcall(doc.getCurrentPage, doc)
+    if ok and page and self.page and page ~= self.page then
+        self:trace("the page changed to %s from the outside", tostring(page))
+        self.page_sentences = nil
     end
 
-    -- Paged mode: the sentence may already be on a page that is not shown yet.
-    -- Its screen boxes cannot be read there (crengine only lays out the pages
-    -- around the current one), so the page has to be turned first -- judging by
-    -- the boxes is exactly what deadlocked the guide: no boxes, so no underline
-    -- and no turn either.
-    if self:needsPageTurn(seg) then
-        self.segment = seg
-        self:trace("sentence is not on the shown page yet: turning to it")
+    if not self.page_sentences then
+        if not self:loadPage() then
+            self:finish("end_of_document")
+            return
+        end
+    end
+
+    local sentence = self.page_sentences[self.index]
+    if not sentence then
+        -- Everything on this page has been read.
+        self.page_sentences = nil
+        self.segment = nil
+        if self.plugin.guide_auto_turn == false then
+            self:trace("page finished, automatic page turning is off")
+            self:finish("end_of_page")
+            return
+        end
         self:turnPage(function() self:step() end)
         return
     end
 
-    self.segment = seg
-    -- remember where this sentence started, so "previous sentence" can go back
-    self.history = self.history or {}
-    table.insert(self.history, seg.pos0)
-    while #self.history > 50 do table.remove(self.history, 1) end
-    self:trace("sentence (%d chars) from %s", #(seg.text or ""), tostring(seg.pos0))
-    -- underline first: it computes the screen boxes that follow() needs
-    self:showUnderline(seg)
-    self:follow(self.visible_boxes)
+    self.segment = sentence
+    self:showUnderline(sentence)
 
-    local delay = self:delayForSentence(seg.text or "")
-    self.xp = seg.pos1
+    local delay = self:delayForSentence(sentence.text or "")
+    self.index = self.index + 1
     self:scheduleIn(delay)
-end
-
---- Is this sentence on a page that has not been reached yet?
----
---- Judged by page number, not by screen boxes: a sentence on the next page has
---- no boxes at all, which is precisely the case where a turn is needed.
-function Guide:needsPageTurn(seg)
-    local ui = self.plugin.ui
-    local view = ui.view
-    if not view or (view.view_mode or "page") ~= "page" then return false end
-    if self.plugin.guide_scroll == false then return false end
-    local doc = ui.document
-    if not doc.getPageFromXPointer or not doc.getCurrentPage then return false end
-
-    local ok, sentence_page = pcall(doc.getPageFromXPointer, doc, seg.pos0)
-    if not ok or type(sentence_page) ~= "number" then return false end
-    local ok2, current_page = pcall(doc.getCurrentPage, doc)
-    if not ok2 or type(current_page) ~= "number" then return false end
-    if sentence_page <= current_page then return false end
-
-    self:trace("sentence is on page %d while page %d is shown",
-        sentence_page, current_page)
-    return true
 end
 
 --- Move on immediately (manual "next sentence").
@@ -734,23 +588,18 @@ function Guide:goForward()
 end
 
 --- Go back to the previous sentence (manual "previous sentence").
---- Uses the history of sentences shown, which is far more reliable than trying
---- to walk backwards through the document.
 function Guide:goBack()
     self:unschedule()
-    local history = self.history
-    if not history or #history == 0 then return end
-    table.remove(history)                -- drop the sentence being shown
-    local previous = table.remove(history)
-    if not previous then return end
-    self.xp = previous
+    if not self.page_sentences then return end
+    -- step() has already advanced past the sentence on screen
+    self.index = math.max(1, self.index - 2)
     self:step()
 end
 
 function Guide:start()
     self:unschedule()
     self.paused = false
-    self.xp = nil
+    self.page_sentences = nil
     self.segment = nil
     if not self:isActive() then return end
     self:step()
@@ -760,7 +609,7 @@ function Guide:stop()
     self:unschedule()
     self.turn_pending = false
     self.paused = false
-    self.xp = nil
+    self.page_sentences = nil
     self.segment = nil
     self:clearUnderline()
 end
@@ -779,10 +628,9 @@ function Guide:resume()
     if not self:isActive() then return end
     self.paused = false
     self:unschedule()
-    local seg = self.segment
-    if seg then
+    if self.segment then
         -- stay on the same sentence, give it its full time again
-        self:scheduleIn(self:delayForSentence(seg.text or ""))
+        self:restartTimer()
     else
         self:step()
     end
