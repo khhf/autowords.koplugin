@@ -842,6 +842,188 @@ do
 end
 
 -- ---------------------------------------------------------------------------
+-- 5. sentence guide
+-- ---------------------------------------------------------------------------
+
+local Guide = require("autowords_guide")
+
+do
+    -- punctuation classification, Chinese and ASCII
+    local p = Count.punctuation("你好，世界。")
+    check("cjk comma counted", p.comma, 1)
+    check("cjk full stop counted", p.sentence_end, 1)
+
+    p = Count.punctuation("a, b; c. d!")
+    check("ascii comma", p.comma, 1)
+    check("ascii semicolon", p.semicolon, 1)
+    check("ascii sentence ends", p.sentence_end, 2)
+    check("no dashes here", p.dash, 0)
+
+    p = Count.punctuation("等等——真的吗？")
+    check("em dashes counted per character", p.dash, 2)
+    check("question mark counted", p.sentence_end, 1)
+
+    check("empty text has no punctuation", Count.punctuation("").comma, 0)
+end
+
+do
+    check("boundary: whitespace", Guide.isBoundaryText(" "), true)
+    check("boundary: full stop", Guide.isBoundaryText("。"), true)
+    check("boundary: comma", Guide.isBoundaryText("，"), true)
+    check("boundary: latin letter", Guide.isBoundaryText("a"), false)
+    check("boundary: hanzi", Guide.isBoundaryText("好"), false)
+    check("boundary: empty", Guide.isBoundaryText(""), true)
+end
+
+do
+    -- pacing
+    local plugin = new_instance()
+    plugin.speed = 300
+    plugin.count_mode = "chars"
+    local guide = Guide:new(plugin)
+
+    local plain = string.rep("一二三四五六七八九十", 3) -- 30 characters
+    check("plain sentence delay", guide:delayForSentence(plain), 6)
+
+    check("sentence end pause added",
+        guide:delayForSentence(plain .. "。"), 31 * 60 / 300 + Guide.defaults.end_pause)
+
+    local commas = string.rep("好，", 4) -- 8 chars, 4 commas
+    local expected = 8 * 60 / 300 + 4 * Guide.defaults.comma_pause
+    check_true("comma pauses added",
+        math.abs(guide:delayForSentence(commas) - expected) < 0.001)
+
+    check_true("paragraph pause added",
+        guide:delayForSentence("完了。\n") >= Guide.defaults.min_sentence_delay
+            + Guide.defaults.paragraph_pause - 0.001)
+
+    check("very short sentence falls back to the minimum",
+        guide:delayForSentence("嗯。"), Guide.defaults.min_sentence_delay)
+
+    plugin.guide_punct_scale = 0
+    check("punct scale 0 removes punctuation pauses",
+        guide:delayForSentence(plain .. "。"), 31 * 60 / 300)
+    plugin.guide_punct_scale = nil
+
+    plugin.guide_punct_scale = 2
+    check("punct scale 2 doubles the punctuation pauses",
+        guide:delayForSentence(plain .. "。"),
+        31 * 60 / 300 + 2 * Guide.defaults.end_pause)
+    plugin.guide_punct_scale = nil
+
+    plugin.guide_min_sentence_delay = 3
+    check("custom minimum respected", guide:delayForSentence("嗯。"), 3)
+    plugin.guide_min_sentence_delay = nil
+
+    plugin.speed = 120
+    check("slower speed means longer delay",
+        guide:delayForSentence(string.rep("一二三四五六七八九十", 2)), 10)
+end
+
+do
+    -- underline drawing / sentence stepping, with a stubbed document
+    local doc = {
+        getXPointer = function() return "xp1" end,
+        getPrevVisibleChar = function() return nil end,
+        getTextFromXPointers = function() return "" end,
+        extendXPointersToSentenceSegment = function(_, p0)
+            if p0 == "xp1" then return { text = "第一句。", pos0 = "xp1", pos1 = "xp2" } end
+            if p0 == "xp2" then return { text = "第二句！", pos0 = "xp2", pos1 = "xp3" } end
+            return nil
+        end,
+        getScreenBoxesFromPositions = function()
+            return { { x = 10, y = 100, w = 200, h = 20 } }
+        end,
+        getPosFromXPointer = function() return { x = 10, y = 500 } end,
+        getCurrentPage = function() return 1 end,
+    }
+    local view = {
+        highlight = { temp = {}, temp_drawer = "lighten" },
+        dialog = { name = "ReaderView" },
+        footer_visible = false,
+    }
+    local plugin = new_instance()
+    plugin.ui.document = doc
+    plugin.ui.view = view
+    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
+    plugin.reading_mode = "sentence"
+    plugin.enabled = true
+    plugin.guide_task = function() end
+
+    local guide = Guide:new(plugin)
+    scheduled = {}
+    guide:step()
+
+    check("underline drawn for the current page", #(view.highlight.temp[1] or {}), 1)
+    check("temporary highlight switched to underline",
+        view.highlight.temp_drawer, "underscore")
+    check("the next sentence is scheduled", #scheduled, 1)
+    check("delay used for a short sentence",
+        scheduled[1].delay, 4 * 60 / 300 + Guide.defaults.end_pause)
+    check("stepping moves to the end of this sentence", guide.xp, "xp2")
+    check("the current segment is remembered", guide.segment.text, "第一句。")
+
+    scheduled = {}
+    guide:step()
+    check("second sentence shown", guide.segment.text, "第二句！")
+    check("underline follows the sentence", #(view.highlight.temp[1] or {}), 1)
+
+    guide:clearUnderline()
+    check("underline cleared", next(view.highlight.temp), nil)
+    check("previous temporary highlight style restored",
+        view.highlight.temp_drawer, "lighten")
+
+    -- running out of text stops the guide and tells the plugin
+    local finished = 0
+    plugin.onGuideFinished = function() finished = finished + 1 end
+    guide.xp = "xp_end"
+    guide:step()
+    check("guide reports the end of the document", finished, 1)
+    check("guide no longer scheduled", guide.scheduled, false)
+end
+
+do
+    -- the guide scrolls only when the sentence leaves the comfortable area
+    local function make(scroll_y)
+        local view = {
+            highlight = { temp = {}, temp_drawer = "lighten" },
+            dialog = {},
+            footer_visible = false,
+        }
+        local plugin = new_instance()
+        plugin.ui.view = view
+        plugin.ui.rolling = {
+            current_pos = 0,
+            _gotoPos = function(_, p) plugin.scrolled_to = p end,
+        }
+        plugin.ui.document = {
+            getPosFromXPointer = function() return { y = scroll_y } end,
+            getCurrentPage = function() return 1 end,
+            getScreenBoxesFromPositions = function() return { { x = 0, y = 0, w = 10, h = 10 } } end,
+            extendXPointersToSentenceSegment = function() return nil end,
+        }
+        plugin.reading_mode = "sentence"
+        plugin.enabled = true
+        plugin.guide_task = function() end
+        return Guide:new(plugin), plugin
+    end
+
+    local guide, plugin = make(100) -- near the top: leave it alone
+    guide:ensureVisible({ pos0 = "xp" })
+    check("no scroll while the sentence is comfortable", plugin.scrolled_to, nil)
+
+    guide, plugin = make(700) -- below the trigger line
+    guide:ensureVisible({ pos0 = "xp" })
+    check("scrolls when the sentence drops too low",
+        plugin.scrolled_to, 700 - math.floor(800 * Guide.defaults.scroll_position))
+
+    guide, plugin = make(0)
+    plugin.ui.rolling.current_pos = 200 -- sentence scrolled off the top
+    guide:ensureVisible({ pos0 = "xp" })
+    check("scrolls back up when the sentence is above the viewport", plugin.scrolled_to, 0)
+end
+
+-- ---------------------------------------------------------------------------
 
 print(string.format("\n%d checks, %d failures", checks, failures))
 if failures > 0 then

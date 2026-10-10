@@ -106,4 +106,56 @@ function Count.count(text, mode)
     return total
 end
 
+-- Punctuation classes, by code point.  Covers the ASCII forms and the CJK /
+-- fullwidth equivalents, since a sentence read in Chinese mixes both freely.
+local PUNCT_CLASS = {}
+local function classify(list, class)
+    for _, cp in ipairs(list) do PUNCT_CLASS[cp] = class end
+end
+-- short pause
+classify({ 0x2C, 0x3001, 0xFF0C, 0x060C, 0xFE50, 0xFE10, 0xFE11 }, "comma")
+-- medium pause
+classify({ 0x3A, 0x3B, 0xFF1A, 0xFF1B, 0xFE13, 0xFE14, 0xFE55 }, "semicolon")
+-- long pause
+classify({ 0x2E, 0x21, 0x3F, 0x3002, 0xFF01, 0xFF1F, 0xFF0E, 0xFE52, 0x2026, 0x203D }, "sentence_end")
+-- dashes
+classify({ 0x2D, 0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0xFE58, 0xFE63, 0xFF0D }, "dash")
+
+--- Punctuation class of a single code point ("comma", "semicolon", "dash",
+--- "sentence_end"), or nil when it is not punctuation we care about.
+function Count.punctClassOf(cp)
+    return PUNCT_CLASS[cp]
+end
+
+--- Whether a single code point is whitespace.
+function Count.isWhitespaceCp(cp)
+    return is_whitespace(cp)
+end
+
+--- Decode one UTF-8 code point of a string.
+-- @treturn number|nil code point, @treturn number next byte index
+function Count.decode(text, i, len)
+    return decode_utf8(text, i, len or #text)
+end
+
+--- Classify the punctuation of a sentence, so the reading guide can add the
+--- pauses a reader naturally takes.
+-- @string text
+-- @treturn table { comma=, semicolon=, dash=, sentence_end= }
+function Count.punctuation(text)
+    local counts = { comma = 0, semicolon = 0, dash = 0, sentence_end = 0 }
+    if type(text) ~= "string" or text == "" then return counts end
+    local i, len = 1, #text
+    while i <= len do
+        local cp
+        cp, i = decode_utf8(text, i, len)
+        if not cp then break end
+        local class = PUNCT_CLASS[cp]
+        if class then
+            counts[class] = counts[class] + 1
+        end
+    end
+    return counts
+end
+
 return Count

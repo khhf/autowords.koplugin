@@ -33,6 +33,7 @@ delay = (units of text on screen) / (reading speed) * 60 seconds
 | ⏱️ **Floor and ceiling** | Never turn faster than N seconds, never wait longer than M |
 | 👆 **Restart on touch** | Touching the screen restarts the countdown for the current page |
 | 📐 **Page distance** | How far the view moves per turn (fractional values work in scroll mode) |
+| 📖 **Sentence guide** | Optional mode that walks the text sentence by sentence, underlining the sentence being read (never saved as an annotation) |
 | 🅰️ **Status-bar icon** | A small selectable badge in the top (*Alt status bar*) and/or the bottom status bar, visible only while AutoWords runs |
 | 🎛️ **Gestures / shortcuts** | Registered as dispatcher actions: `AutoWords: start/stop`, `AutoWords: settings` |
 | 🩺 **Diagnostics** | One dialog listing every piece of state that matters when the icon does not show up |
@@ -123,12 +124,16 @@ bottom bar is only touched when you explicitly ask for it (see the note in *How 
 | Menu item | Description | Default |
 | --- | --- | --- |
 | Reading speed | Units per minute, 10–3000 | 300 |
+| Reading mode | **Whole page** / **Sentence guide** (mutually exclusive) | Whole page |
 | Calibrate on this page | Derives the speed from this page plus a duration you type | — |
 | Counting mode | **Characters** (every non-space UTF-8 code point) / **Words** (CJK per character, latin per word) | Characters |
 | Minimum delay | Never turn faster than this — handy for image-only pages | 2 s |
 | Maximum delay | Upper bound, 0 = no limit | none |
 | Restart after touch | Touching the screen restarts the countdown for the current page | on |
 | Page distance | How far the view moves per turn, 1 = one screen | 1 |
+| Min. sentence time | A sentence stays on screen at least this long (sentence guide) | 0.8 s |
+| Punctuation pause | Scales every punctuation pause at once | 1.0x |
+| Paragraph pause | Extra time when a sentence ends a paragraph | 0.6 s |
 | Icon position | Top / Bottom / Both / Hidden | Top |
 | Icon character | `Ⓐ ⓐ (A) [A] A ●` | Ⓐ |
 | Diagnostics | Dumps plugin and status-bar state | — |
@@ -190,6 +195,44 @@ One crengine text extraction plus one linear scan per page turn, nothing else �
 faster than the page turn itself, no per-frame work. The icon is text, so drawing it costs
 KOReader exactly nothing.
 
+### The sentence guide
+
+*Sentence guide* is the second reading mode (the two modes are mutually
+exclusive): instead of timing whole pages, it walks the text one sentence at a
+time and keeps a single underline under the sentence being read.
+
+- **Sentence boundaries come from crengine itself**,
+  `document:extendXPointersToSentenceSegment()` — the same call KOReader uses for
+  its *extend selection to sentence* action. The next sentence simply starts
+  where the previous one ended, so nothing is skipped or repeated, and there is
+  no regex guessing about what a sentence is.
+- **The underline is not an annotation.** It is drawn through KOReader's
+  *temporary* highlight (`view.highlight.temp` with
+  `view.highlight.temp_drawer = "underscore"`), the same mechanism dictionary
+  lookups use. Temporary highlights are painted on screen and never written to
+  the document settings, so **nothing this plugin draws can show up in the
+  bookmark/annotation list**, and nothing is added to your highlights when you
+  export them later.
+- **Pacing** is the reading time of the sentence plus the pauses a reader
+  naturally takes:
+
+  ```
+  delay = characters / speed * 60
+        + commas × 0.15 s + semicolons × 0.25 s + dashes × 0.15 s
+        + (sentence ends ? 0.4 s)
+        + (paragraph ends ? 0.6 s)
+  ```
+
+  with a floor of *Min. sentence time* (0.8 s by default) — without it a page of
+  short dialogue lines would race past. *Punctuation pause* scales all the
+  punctuation terms at once (0 disables them, 2 doubles them).
+- **Scrolling**: when the current sentence would drop below about 2/3 of the
+  usable height (or has gone off the top), the view scrolls so that the sentence
+  sits about 1/3 from the top, always leaving text visible underneath it.
+- **Manual control**: bind *AutoWords: next sentence* / *AutoWords: previous
+  sentence* to a gesture to move by hand. Touching the screen restarts the
+  countdown for the current sentence, like in page mode.
+
 ## Known limitations
 
 1. **No PDF / DJVU / image documents.** The text cannot be measured there; the plugin
@@ -207,6 +250,13 @@ KOReader exactly nothing.
 7. Localization of the readings themselves (KOReader needs `.po` catalogues, which a
    user-side plugin cannot install) is done with a small in-tree table for Simplified
    Chinese, falling back to KOReader's own translations everywhere else.
+
+8. **The sentence guide needs a reflowable document** (it relies on crengine sentence
+   xpointers); PDF and DJVU are refused in that mode.
+9. The underline moves every few seconds and is repainted partially; on e-ink, ghosting can
+   show up — raising *Min. sentence time* helps a lot.
+10. Dictionary lookups and text selection use the same temporary highlight and briefly cover
+    the underline; it comes back afterwards.
 
 ## Troubleshooting
 
@@ -231,22 +281,24 @@ times the number of *words*.
 ## Development
 
 The plugin is plain Lua, and the test suite runs offline — no device, no KOReader
-required. It loads the real `main.lua` and `autowords_count.lua` with stubbed KOReader
-modules and checks counting, delay math, the scheduling state machine, the lifecycle
-hooks, every dialog and the status-bar registration.
+required. It loads the real `main.lua`, `autowords_count.lua` and `autowords_guide.lua`
+with stubbed KOReader modules and checks counting, delay math, the scheduling state
+machine, the lifecycle hooks, every dialog, the status-bar registration, and the sentence
+guide (punctuation classification, sentence boundaries, pacing, underline and scrolling).
 
 ```
 python -m pip install lupa      # test runner only; the plugin itself has no dependencies
 python tests/run_tests.py
 ```
 
-Current status: **203 checks, 0 failures**.
+Current status: **242 checks, 0 failures**.
 
 ```
 .                            # the repository root is the plugin directory
 ├── _meta.lua                # plugin metadata
 ├── main.lua                 # timing, page turning, menu, dialogs, status-bar wiring
 ├── autowords_count.lua      # dependency-free UTF-8 counting
+├── autowords_guide.lua      # sentence guide: stepping, underline, pacing, scrolling
 ├── autowords_i18n.lua       # UI strings (Chinese table + KOReader gettext)
 └── tests/                   # not installed, development only
     ├── run_tests.py         # runner (lupa)

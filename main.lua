@@ -34,6 +34,7 @@ belongs to KOReader's "tap to open the menu" zone.
 local ButtonDialog = require("ui/widget/buttondialog")
 local Count = require("autowords_count")
 local Dispatcher = require("dispatcher")
+local Guide = require("autowords_guide")
 local Event = require("ui/event")
 local InfoMessage = require("ui/widget/infomessage")
 local PluginShare = require("pluginshare")
@@ -61,6 +62,19 @@ local AutoWords = WidgetContainer:extend{
     -- where the little icon is shown: "top", "bottom", "both" or "none".
     -- Default "top": the bottom status bar is left completely alone then.
     icon_position = "top",
+
+    -- reading mode: "page" measures whole pages; "sentence" walks the text one
+    -- sentence at a time, underlining the sentence being read.
+    reading_mode = "page",
+    -- sentence guide pacing (nil = use the default from autowords_guide.lua)
+    guide_min_sentence_delay = nil, -- seconds a sentence stays on screen at least
+    guide_comma_pause = nil,
+    guide_semicolon_pause = nil,
+    guide_dash_pause = nil,
+    guide_end_pause = nil,
+    guide_paragraph_pause = nil,
+    guide_punct_scale = nil,     -- scales every punctuation pause at once
+    guide_scroll_position = nil, -- keep the sentence at this fraction of the usable height
 
     -- runtime state
     retry_delay = 2,
@@ -453,6 +467,69 @@ function AutoWords:tick()
 end
 
 --- Enable/disable, persisting the setting.
+-- ---------------------------------------------------------------------------
+-- Reading mode and the sentence guide
+-- ---------------------------------------------------------------------------
+
+--- "page" (measure whole pages) or "sentence" (walk sentence by sentence).
+function AutoWords:readingMode()
+    local mode = self.reading_mode
+    if mode == "sentence" or mode == "page" then return mode end
+    return "page"
+end
+
+--- Switch reading mode; restarts whatever is running.
+function AutoWords:setReadingMode(mode)
+    if mode ~= "sentence" and mode ~= "page" then return end
+    if self:readingMode() == mode then return end
+    local was_enabled = self.enabled
+    if was_enabled then
+        self.enabled = false
+        self:stopScheduling()
+        self:stopGuide()
+    end
+    self.reading_mode = mode
+    G_reader_settings:saveSetting("autowords_reading_mode", mode)
+    if was_enabled then
+        self:setEnabled(true)
+    else
+        self:refreshMenu()
+    end
+end
+
+function AutoWords:isGuideSupported()
+    return self.guide ~= nil and self.guide:isSupported()
+end
+
+function AutoWords:startGuide()
+    if not self:isGuideSupported() then
+        self.enabled = false
+        G_reader_settings:makeFalse("autowords_enabled")
+        UIManager:show(InfoMessage:new{
+            text = _("The sentence guide needs a reflowable document (EPUB, FB2, TXT ...)."),
+            timeout = 4,
+        })
+        return
+    end
+    self.guide:start()
+end
+
+function AutoWords:stopGuide()
+    if self.guide then self.guide:stop() end
+end
+
+--- Called by the guide when it runs out of text to show.
+function AutoWords:onGuideFinished()
+    if not self.enabled then return end
+    self.enabled = false
+    G_reader_settings:makeFalse("autowords_enabled")
+    self:refreshMenu()
+    UIManager:show(InfoMessage:new{
+        text = _("AutoWords stopped: the end of the document has been reached."),
+        timeout = 3,
+    })
+end
+
 function AutoWords:setEnabled(on)
     self.enabled = on and true or false
     if self.enabled then
@@ -466,18 +543,23 @@ function AutoWords:setEnabled(on)
             return
         end
         G_reader_settings:makeTrue("autowords_enabled")
-        self:scheduleForCurrentPage()
-        local count = self:currentCount()
-        local delay = self:delayForCount(count)
-        UIManager:show(InfoMessage:new{
-            text = T(_("AutoWords is on: %1 %2/min.\nThis page: %3 %2 → %4 s."),
-                self.speed, self:unitName(), count or 0,
-                string.format("%.1f", delay)),
-            timeout = 4,
-        })
+        if self:readingMode() == "sentence" then
+            self:startGuide()
+        else
+            self:scheduleForCurrentPage()
+            local count = self:currentCount()
+            local delay = self:delayForCount(count)
+            UIManager:show(InfoMessage:new{
+                text = T(_("AutoWords is on: %1 %2/min.\nThis page: %3 %2 → %4 s."),
+                    self.speed, self:unitName(), count or 0,
+                    string.format("%.1f", delay)),
+                timeout = 4,
+            })
+        end
     else
         G_reader_settings:makeFalse("autowords_enabled")
         self:stopScheduling()
+        self:stopGuide()
     end
     self:refreshMenu()
     self:refreshStatusBars()
@@ -505,9 +587,20 @@ function AutoWords:init()
         end
     end
     self.icon_text = G_reader_settings:readSetting("autowords_icon_text")
+    self.reading_mode = G_reader_settings:readSetting("autowords_reading_mode", "page")
+    self.guide_min_sentence_delay = tonumber(G_reader_settings:readSetting("autowords_guide_min_sentence_delay"))
+    self.guide_comma_pause = tonumber(G_reader_settings:readSetting("autowords_guide_comma_pause"))
+    self.guide_semicolon_pause = tonumber(G_reader_settings:readSetting("autowords_guide_semicolon_pause"))
+    self.guide_dash_pause = tonumber(G_reader_settings:readSetting("autowords_guide_dash_pause"))
+    self.guide_end_pause = tonumber(G_reader_settings:readSetting("autowords_guide_end_pause"))
+    self.guide_paragraph_pause = tonumber(G_reader_settings:readSetting("autowords_guide_paragraph_pause"))
+    self.guide_punct_scale = tonumber(G_reader_settings:readSetting("autowords_guide_punct_scale"))
+    self.guide_scroll_position = tonumber(G_reader_settings:readSetting("autowords_guide_scroll_position"))
     self.enabled = G_reader_settings:isTrue("autowords_enabled")
 
     self.task = function() self:tick() end
+    self.guide = Guide:new(self)
+    self.guide_task = function() self.guide:step() end
 
     self.ui.menu:registerToMainMenu(self)
     self:onDispatcherRegisterActions()
@@ -531,8 +624,30 @@ function AutoWords:onDispatcherRegisterActions()
         event = "AutoWordsSettings",
         title = _("AutoWords: settings"),
         reader = true,
+    })
+    Dispatcher:registerAction("autowords_next_sentence", {
+        category = "none",
+        event = "AutoWordsNextSentence",
+        title = _("AutoWords: next sentence"),
+        reader = true,
+    })
+    Dispatcher:registerAction("autowords_prev_sentence", {
+        category = "none",
+        event = "AutoWordsPrevSentence",
+        title = _("AutoWords: previous sentence"),
+        reader = true,
         separator = true,
     })
+end
+
+function AutoWords:onAutoWordsNextSentence()
+    if self.guide then self.guide:goForward() end
+    return true
+end
+
+function AutoWords:onAutoWordsPrevSentence()
+    if self.guide then self.guide:goBack() end
+    return true
 end
 
 function AutoWords:onAutoWordsToggle()
@@ -550,7 +665,11 @@ function AutoWords:onReaderReady()
     -- with the status bars (see the note in init()).
     self:applyIconPosition()
     if self:isActive() then
-        self:scheduleForCurrentPage()
+        if self:readingMode() == "sentence" then
+            self:startGuide()
+        else
+            self:scheduleForCurrentPage()
+        end
     end
 end
 
@@ -561,10 +680,16 @@ function AutoWords:onSetDimensions()
 end
 
 --- The user turned a page by hand (or the view moved): restart the timer so
---- the delay matches the page now on screen.
+--- the delay matches the page now on screen.  In sentence mode KOReader clears
+--- the temporary highlight on every position change, so the guide just redraws
+--- its underline.
 function AutoWords:onPageUpdate()
     if self.self_turning then return end
     if not self:isActive() then return end
+    if self:readingMode() == "sentence" then
+        if self.guide then self.guide:refresh() end
+        return
+    end
     self.no_move_count = 0
     self:scheduleForCurrentPage()
 end
@@ -572,6 +697,10 @@ end
 function AutoWords:onPosUpdate()
     if self.self_turning then return end
     if not self:isActive() then return end
+    if self:readingMode() == "sentence" then
+        if self.guide then self.guide:refresh() end
+        return
+    end
     self.no_move_count = 0
     self:scheduleForCurrentPage()
 end
@@ -587,32 +716,44 @@ function AutoWords:onEndOfBook()
     return false
 end
 
---- Touching the screen restarts the countdown for the current page.
+--- Touching the screen restarts the countdown for the current page/sentence.
 function AutoWords:onInputEvent()
     if self.self_turning then return end
     if not self.restart_on_input or not self:isActive() then return end
+    if self:readingMode() == "sentence" then
+        if self.guide then self.guide:restartTimer() end
+        return
+    end
     self:restartTimer()
 end
 
 function AutoWords:onSuspend()
     self:stopScheduling("suspended")
+    if self.guide then self.guide:unschedule() end
 end
 
 function AutoWords:onResume()
     if self:isActive() then
-        self:scheduleForCurrentPage()
+        if self:readingMode() == "sentence" then
+            self:startGuide()
+        else
+            self:scheduleForCurrentPage()
+        end
     end
 end
 
 function AutoWords:onCloseDocument()
     self:stopScheduling("document closed")
+    self:stopGuide()
     self:teardownStatusBarIcons()
 end
 
 function AutoWords:onCloseWidget()
     self:stopScheduling("widget closed")
+    self:stopGuide()
     self:teardownStatusBarIcons()
     self.task = nil
+    self.guide_task = nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -651,12 +792,27 @@ function AutoWords:refreshMenu()
     end
 end
 
---- Main dialog: shows the current page's text count, the delay it implies,
---- and gives access to speed setting / calibration.
+--- Main dialog: shows what the current mode measured, and gives access to the
+--- mode, the speed and the calibration.
 function AutoWords:showSettingsDialog()
     local info
     if not self:isSupportedDocument() then
         info = _("This document type is not supported: AutoWords needs the text layout engine (EPUB, FB2, TXT ...), so PDF and DJVU cannot be measured.")
+    elseif self:readingMode() == "sentence" then
+        if not self:isGuideSupported() then
+            info = _("The sentence guide needs a reflowable document (EPUB, FB2, TXT ...).")
+        else
+            local status = self.enabled and _("running") or _("stopped")
+            local seg = self.guide and self.guide.segment
+            if seg and seg.text and seg.text ~= "" then
+                info = T(_("Sentence guide: %1\nThis sentence: %2 %3 → waits %4 s"),
+                    status,
+                    Count.count(seg.text, self.count_mode), self:unitName(),
+                    string.format("%.1f", self.guide:delayForSentence(seg.text)))
+            else
+                info = T(_("Sentence guide: %1"), status)
+            end
+        end
     else
         local count = self:currentCount()
         if count == nil then
@@ -675,27 +831,27 @@ function AutoWords:showSettingsDialog()
         buttons = {
             {
                 {
+                    text = T(_("Mode: %1"), self:readingModeName()),
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:showModeDialog()
+                    end,
+                },
+                {
                     text = _("Reading speed"),
                     callback = function()
                         UIManager:close(dialog)
                         self:showSpeedDialog()
                     end,
                 },
+            },
+            {
                 {
                     text = _("Calibrate on this page"),
                     enabled = self:isSupportedDocument(),
                     callback = function()
                         UIManager:close(dialog)
                         self:showCalibrateDialog()
-                    end,
-                },
-            },
-            {
-                {
-                    text = self.enabled and _("Stop") or _("Start"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        self:setEnabled(not self.enabled)
                     end,
                 },
                 {
@@ -708,6 +864,13 @@ function AutoWords:showSettingsDialog()
             },
             {
                 {
+                    text = self.enabled and _("Stop") or _("Start"),
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:setEnabled(not self.enabled)
+                    end,
+                },
+                {
                     text = _("Close"),
                     callback = function() UIManager:close(dialog) end,
                 },
@@ -715,6 +878,66 @@ function AutoWords:showSettingsDialog()
         },
     }
     UIManager:show(dialog)
+end
+
+--- A sentence-guide pacing value: the plugin setting if the user changed it,
+--- otherwise the default from autowords_guide.lua.
+function AutoWords:guideSetting(name)
+    local value = self["guide_" .. name]
+    if value == nil then value = Guide.defaults[name] end
+    return value
+end
+
+--- Store a sentence-guide pacing value and restart the guide if it runs.
+function AutoWords:setGuideSetting(name, value)
+    self["guide_" .. name] = value
+    G_reader_settings:saveSetting("autowords_guide_" .. name, value)
+    if self:isActive() and self:readingMode() == "sentence" then
+        self:startGuide()
+    end
+    self:refreshMenu()
+end
+
+--- Human readable name of the current reading mode.
+function AutoWords:readingModeName()
+    if self:readingMode() == "sentence" then
+        return _("sentence guide")
+    end
+    return _("whole page")
+end
+
+--- Pick the reading mode (the two modes are mutually exclusive).
+function AutoWords:showModeDialog()
+    local rows = {}
+    for _, choice in ipairs({
+        { value = "page", text = _("Whole page") },
+        { value = "sentence", text = _("Sentence guide") },
+    }) do
+        local value = choice.value
+        table.insert(rows, {
+            {
+                text = choice.text .. (self:readingMode() == value and "  ✓" or ""),
+                callback = function()
+                    UIManager:close(self._mode_dialog)
+                    self:setReadingMode(value)
+                    self:showSettingsDialog()
+                end,
+            },
+        })
+    end
+    table.insert(rows, {
+        {
+            text = _("Close"),
+            callback = function() UIManager:close(self._mode_dialog) end,
+        },
+    })
+
+    self._mode_dialog = ButtonDialog:new{
+        title = _("Reading mode\n\nWhole page: turns the page once the text on it has been read.\n\nSentence guide: draws a line under the sentence being read and moves on sentence by sentence.\n\nThe two modes are mutually exclusive."),
+        title_align = "center",
+        buttons = rows,
+    }
+    UIManager:show(self._mode_dialog)
 end
 
 function AutoWords:showSpeedDialog()
@@ -858,12 +1081,37 @@ function AutoWords:showMoreDialog()
             },
             {
                 {
+                    text = T(_("Min. sentence time: %1 s"), self:guideSetting("min_sentence_delay")),
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:showMinSentenceDelayDialog()
+                    end,
+                },
+                {
+                    text = T(_("Punctuation pause: %1x"), self:guideSetting("punct_scale")),
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:showPunctScaleDialog()
+                    end,
+                },
+            },
+            {
+                {
+                    text = T(_("Paragraph pause: %1 s"), self:guideSetting("paragraph_pause")),
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:showParagraphPauseDialog()
+                    end,
+                },
+                {
                     text = T(_("Icon character: %1"), self:iconText()),
                     callback = function()
                         UIManager:close(dialog)
                         self:showIconDialog()
                     end,
                 },
+            },
+            {
                 {
                     text = _("Diagnostics"),
                     callback = function()
@@ -871,8 +1119,6 @@ function AutoWords:showMoreDialog()
                         self:showDiagnosticDialog()
                     end,
                 },
-            },
-            {
                 {
                     text = _("Close"),
                     callback = function() UIManager:close(dialog) end,
@@ -1074,6 +1320,62 @@ function AutoWords:showDistanceDialog()
             if self:isActive() then
                 self:scheduleForCurrentPage()
             end
+        end,
+    })
+end
+
+function AutoWords:showMinSentenceDelayDialog()
+    UIManager:show(SpinWidget:new{
+        title_text = _("Minimum sentence time"),
+        info_text = _("A sentence stays on screen at least this long, so a page full of short dialogue lines does not race past."),
+        value = self:guideSetting("min_sentence_delay"),
+        value_min = 0,
+        value_max = 30,
+        value_step = 0.1,
+        value_hold_step = 1,
+        precision = "%.1f",
+        default_value = Guide.defaults.min_sentence_delay,
+        unit = _("s"),
+        ok_text = _("Set"),
+        callback = function(spin)
+            self:setGuideSetting("min_sentence_delay", spin.value)
+        end,
+    })
+end
+
+function AutoWords:showPunctScaleDialog()
+    UIManager:show(SpinWidget:new{
+        title_text = _("Punctuation pause"),
+        info_text = _("Scales every pause taken at punctuation (comma, semicolon, sentence end). 1.0 is the built-in amount, 0 disables punctuation pauses."),
+        value = self:guideSetting("punct_scale"),
+        value_min = 0,
+        value_max = 3,
+        value_step = 0.1,
+        value_hold_step = 0.5,
+        precision = "%.1f",
+        default_value = Guide.defaults.punct_scale,
+        ok_text = _("Set"),
+        callback = function(spin)
+            self:setGuideSetting("punct_scale", spin.value)
+        end,
+    })
+end
+
+function AutoWords:showParagraphPauseDialog()
+    UIManager:show(SpinWidget:new{
+        title_text = _("Paragraph pause"),
+        info_text = _("Extra time when a sentence ends at the end of a paragraph."),
+        value = self:guideSetting("paragraph_pause"),
+        value_min = 0,
+        value_max = 10,
+        value_step = 0.1,
+        value_hold_step = 1,
+        precision = "%.1f",
+        default_value = Guide.defaults.paragraph_pause,
+        unit = _("s"),
+        ok_text = _("Set"),
+        callback = function(spin)
+            self:setGuideSetting("paragraph_pause", spin.value)
         end,
     })
 end

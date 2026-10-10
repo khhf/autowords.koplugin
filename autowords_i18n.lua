@@ -51,6 +51,34 @@ local zh = {
     ["Page distance"] = "翻页距离",
     ["Page distance: %1"] = "翻页距离：%1",
     ["Icon position: %1"] = "图标位置：%1",
+    ["Mode: %1"] = "模式：%1",
+    ["whole page"] = "整页翻页",
+    ["sentence guide"] = "逐句导引",
+    ["running"] = "运行中",
+    ["stopped"] = "已停止",
+    ["Whole page"] = "整页翻页",
+    ["Sentence guide"] = "逐句导引",
+    ["Sentence guide: %1"] = "逐句导引：%1",
+    ["Sentence guide: %1\nThis sentence: %2 %3 → waits %4 s"] =
+        "逐句导引：%1\n本句：%2 %3 → 停留 %4 秒",
+    ["Reading mode\n\nWhole page: turns the page once the text on it has been read.\n\nSentence guide: draws a line under the sentence being read and moves on sentence by sentence.\n\nThe two modes are mutually exclusive."] =
+        "阅读模式\n\n整页翻页：这一页的文字读完后翻页。\n\n逐句导引：在当前朗读的句子下面画一条横线，按句推进。\n\n两种模式互斥，只能选一个。",
+    ["The sentence guide needs a reflowable document (EPUB, FB2, TXT ...)."] =
+        "逐句导引需要可重排文档（EPUB、FB2、TXT 等）。",
+    ["Min. sentence time: %1 s"] = "最短句停留：%1 秒",
+    ["Punctuation pause: %1x"] = "标点停顿：%1 倍",
+    ["Paragraph pause: %1 s"] = "段落停顿：%1 秒",
+    ["Minimum sentence time"] = "最短句停留",
+    ["A sentence stays on screen at least this long, so a page full of short dialogue lines does not race past."] =
+        "一句话至少停留这么久，避免对话多的页面上横线飞快往下跑。",
+    ["Punctuation pause"] = "标点停顿",
+    ["Scales every pause taken at punctuation (comma, semicolon, sentence end). 1.0 is the built-in amount, 0 disables punctuation pauses."] =
+        "统一缩放标点处的停顿（逗号、分号、句末）。1.0 是内置值，0 表示标点不停顿。",
+    ["Paragraph pause"] = "段落停顿",
+    ["Extra time when a sentence ends at the end of a paragraph."] =
+        "句子正好在段落末尾结束时的额外停留。",
+    ["AutoWords: next sentence"] = "AutoWords：下一句",
+    ["AutoWords: previous sentence"] = "AutoWords：上一句",
     ["top bar"] = "顶部状态栏",
     ["bottom bar"] = "底部状态栏",
     ["top + bottom"] = "顶部 + 底部",
