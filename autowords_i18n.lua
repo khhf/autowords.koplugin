@@ -86,6 +86,8 @@ local zh = {
     ["AutoWords guide resumed."] = "AutoWords 已继续。",
     ["AutoWords stopped: this position could not be read as a sentence."] =
         "AutoWords 已停止：这个位置读不出句子。",
+    ["Follow by scrolling: on"] = "自动滚动跟随：开",
+    ["Follow by scrolling: off"] = "自动滚动跟随：关",
     ["top bar"] = "顶部状态栏",
     ["bottom bar"] = "底部状态栏",
     ["top + bottom"] = "顶部 + 底部",

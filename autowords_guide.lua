@@ -154,18 +154,27 @@ function Guide:trySentence(xp)
 end
 
 --- Walk backwards until crengine agrees this is a sentence start, so the first
---- sentence shown is a complete one.  Bounded, because a paragraph without any
---- punctuation would otherwise walk the whole document.
+--- sentence shown is a complete one.  Bounded hard: every step is an FFI call,
+--- and a stray xpointer chain must never turn into a long loop.
 function Guide:findSentenceStart(xp)
     local doc = self.plugin.ui.document
     local cur = xp
-    for _ = 1, 200 do
+    local steps = 0
+    for _ = 1, 20 do
         local seg = self:trySentence(cur)
-        if seg then return seg.pos0 or cur end
+        if seg then
+            if steps > 0 then
+                logger.dbg("AutoWords guide: sentence start found after", steps, "steps back")
+            end
+            return seg.pos0 or cur
+        end
         local ok, prev = pcall(doc.getPrevVisibleChar, doc, cur)
-        if not ok or not prev or prev == cur then break end
+        if not ok or not prev or prev == cur or prev == "" then break end
         cur = prev
+        steps = steps + 1
     end
+    logger.dbg("AutoWords guide: keeping the given position as sentence start after",
+        steps, "steps back")
     return cur
 end
 
@@ -187,14 +196,15 @@ function Guide:currentSegment()
     -- after a comma), step forward a little instead of declaring the book
     -- finished -- that used to stop the guide on the first sentence.
     local xp = self.xp
-    for _ = 1, 60 do
-        local seg = self:trySentence(xp)
+    for _ = 1, 8 do
+        local seg, reason = self:trySentence(xp)
         if seg then
             self.xp = xp
             return seg
         end
+        logger.dbg("AutoWords guide: no sentence at", tostring(xp), "(", reason, ")")
         local ok, nxt = pcall(doc.getNextVisibleChar, doc, xp)
-        if not ok or not nxt or nxt == xp then break end
+        if not ok or not nxt or nxt == xp or nxt == "" then break end
         xp = nxt
     end
 
@@ -208,7 +218,14 @@ end
 function Guide:sentenceBoxes(seg)
     local doc = self.plugin.ui.document
     local ok, boxes = pcall(doc.getScreenBoxesFromPositions, doc, seg.pos0, seg.pos1, true)
-    if not ok or not boxes or #boxes == 0 then return nil end
+    if not ok then
+        logger.warn("AutoWords guide: getScreenBoxesFromPositions failed:", boxes)
+        return nil
+    end
+    if not boxes or #boxes == 0 then
+        logger.dbg("AutoWords guide: the sentence has no screen boxes")
+        return nil
+    end
     return boxes
 end
 
@@ -229,8 +246,12 @@ function Guide:showUnderline(seg)
     end
     view.highlight.temp_drawer = "underscore"
 
-    local page = self.plugin.ui.document:getCurrentPage()
+    local doc = self.plugin.ui.document
+    local page_ok, page = pcall(doc.getCurrentPage, doc)
+    if not page_ok or not page then page = 1 end
     view.highlight.temp = { [page] = boxes }
+    logger.dbg("AutoWords guide: underline on page", page, "over", #boxes, "line(s), first at y =",
+        (boxes[1] and boxes[1].y) or "?")
     self:redraw()
 end
 
@@ -260,18 +281,23 @@ end
 --- trigger line (or above the top), scroll so that it sits at the configured
 --- fraction of the usable height.
 function Guide:ensureVisible(seg)
+    if self.plugin.guide_scroll == false then return end
     local ui = self.plugin.ui
     local rolling = ui.rolling
     local doc = ui.document
-    if not rolling or not doc.getPosFromXPointer then return end
+    if not rolling or not doc.getPosFromXPointer or not rolling._gotoPos then return end
 
     local ok, pos = pcall(doc.getPosFromXPointer, doc, seg.pos0)
-    if not ok or not pos or not pos.y then return end
+    if not ok or not pos or not pos.y then
+        logger.dbg("AutoWords guide: cannot locate the sentence for scrolling")
+        return
+    end
 
     local view = ui.view
     local footer_h = 0
     if view and view.footer_visible and view.footer and view.footer.getHeight then
-        footer_h = view.footer:getHeight() or 0
+        local ok2, h = pcall(view.footer.getHeight, view.footer)
+        if ok2 then footer_h = h or 0 end
     end
     local usable_h = Screen:getHeight() - footer_h
     if usable_h <= 0 then return end
@@ -287,7 +313,10 @@ function Guide:ensureVisible(seg)
     local new_pos = pos.y - target_y
     if new_pos < 0 then new_pos = 0 end
     logger.dbg("AutoWords guide: scrolling to", new_pos, "(sentence was at", screen_y, ")")
-    rolling:_gotoPos(new_pos, false)
+    local ok3, err = pcall(rolling._gotoPos, rolling, new_pos, false)
+    if not ok3 then
+        logger.warn("AutoWords guide: scrolling failed:", err)
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -339,6 +368,8 @@ function Guide:step()
     end
 
     self.segment = seg
+    logger.dbg("AutoWords guide: sentence", tostring(seg.pos0), "->", tostring(seg.pos1),
+        "(", #(seg.text or ""), "bytes )")
     -- scroll first: scrolling clears the temporary highlight and moves the text
     self:ensureVisible(seg)
     self:showUnderline(seg)

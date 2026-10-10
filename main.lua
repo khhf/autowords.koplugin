@@ -74,6 +74,7 @@ local AutoWords = WidgetContainer:extend{
     guide_end_pause = nil,
     guide_paragraph_pause = nil,
     guide_punct_scale = nil,     -- scales every punctuation pause at once
+    guide_scroll = nil,          -- follow the sentence by scrolling (nil = yes)
     guide_scroll_position = nil, -- keep the sentence at this fraction of the usable height
 
     -- runtime state
@@ -618,6 +619,7 @@ function AutoWords:init()
     self.guide_end_pause = tonumber(G_reader_settings:readSetting("autowords_guide_end_pause"))
     self.guide_paragraph_pause = tonumber(G_reader_settings:readSetting("autowords_guide_paragraph_pause"))
     self.guide_punct_scale = tonumber(G_reader_settings:readSetting("autowords_guide_punct_scale"))
+    self.guide_scroll = G_reader_settings:nilOrTrue("autowords_guide_scroll")
     self.guide_scroll_position = tonumber(G_reader_settings:readSetting("autowords_guide_scroll_position"))
     self.enabled = G_reader_settings:isTrue("autowords_enabled")
 
@@ -1158,14 +1160,26 @@ function AutoWords:showMoreDialog()
                     end,
                 },
                 {
+                    text = self.guide_scroll and _("Follow by scrolling: on") or _("Follow by scrolling: off"),
+                    callback = function()
+                        self.guide_scroll = not self.guide_scroll
+                        G_reader_settings:saveSetting("autowords_guide_scroll", self.guide_scroll)
+                        UIManager:close(dialog)
+                        if self:isActive() and self:readingMode() == "sentence" then
+                            self:startGuide()
+                        end
+                        self:showMoreDialog()
+                    end,
+                },
+            },
+            {
+                {
                     text = T(_("Icon character: %1"), self:iconText()),
                     callback = function()
                         UIManager:close(dialog)
                         self:showIconDialog()
                     end,
                 },
-            },
-            {
                 {
                     text = _("Diagnostics"),
                     callback = function()
@@ -1173,6 +1187,8 @@ function AutoWords:showMoreDialog()
                         self:showDiagnosticDialog()
                     end,
                 },
+            },
+            {
                 {
                     text = _("Close"),
                     callback = function() UIManager:close(dialog) end,
