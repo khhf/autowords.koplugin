@@ -555,6 +555,13 @@ function AutoWords:onGuideFinished(reason)
 end
 
 function AutoWords:setEnabled(on)
+    if on and self._menu then
+        -- The menu stays open behind our dialogs (the item has a checked_func),
+        -- and the guide refuses to run while anything covers the reader -- so
+        -- without closing it, "Start" would only take effect after a retry
+        -- delay, which looks like nothing happening.
+        pcall(function() self._menu:closeMenu() end)
+    end
     self.enabled = on and true or false
     if self.enabled then
         if not self:isSupportedDocument() then

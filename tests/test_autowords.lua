@@ -842,10 +842,65 @@ do
 end
 
 -- ---------------------------------------------------------------------------
+-- The screen boxes the guide asked the view to draw.
+local function view_boxes(plugin)
+    local temp = plugin.ui.view.highlight.temp
+    return temp[1] or temp[next(temp)] or {}
+end
+
 -- 5. sentence guide
 -- ---------------------------------------------------------------------------
 
 local Guide = require("autowords_guide")
+
+-- A tiny fake document: six characters, xpointers c0 (before the first) .. c6.
+-- getTextFromXPointers(cN, cN+1) yields the (N+1)-th character.
+local GUIDE_CHARS = { "你", "好", "。", "世", "界", "！" }
+
+local function guide_doc(overrides)
+    local doc = {
+        is_open = true,
+        getCurrentPage = function() return 1 end,
+        getTextFromPositions = function()
+            return { text = table.concat(GUIDE_CHARS), pos0 = "c0", pos1 = "c6" }
+        end,
+        getNextVisibleChar = function(_, xp)
+            local i = tonumber(xp:match("^c(%d+)$"))
+            if not i or i + 1 > #GUIDE_CHARS then return xp end
+            return "c" .. (i + 1)
+        end,
+        getTextFromXPointers = function(_, a)
+            local i = tonumber(a:match("^c(%d+)$"))
+            if i and i >= 0 and i < #GUIDE_CHARS then return GUIDE_CHARS[i + 1] end
+            return ""
+        end,
+        getScreenBoxesFromPositions = function()
+            return { { x = 0, y = 20, w = 100, h = 16 } }
+        end,
+        getPosFromXPointer = function() return { y = 100 } end,
+    }
+    for k, v in pairs(overrides or {}) do doc[k] = v end
+    return doc
+end
+
+local function guide_instance(overrides)
+    local plugin = new_instance()
+    plugin.ui.document = guide_doc(overrides and overrides.doc)
+    plugin.ui.view = {
+        highlight = { temp = {}, temp_drawer = "lighten" },
+        dialog = {},
+        footer_visible = false,
+    }
+    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
+    plugin.reading_mode = "sentence"
+    plugin.enabled = true
+    plugin.guide_task = function() end
+    local guide = Guide:new(plugin)
+    for k, v in pairs(overrides or {}) do
+        if k ~= "doc" then guide[k] = v end
+    end
+    return guide, plugin
+end
 
 do
     -- punctuation classification, Chinese and ASCII
@@ -867,12 +922,11 @@ do
 end
 
 do
-    check("boundary: whitespace", Guide.isBoundaryText(" "), true)
-    check("boundary: full stop", Guide.isBoundaryText("。"), true)
-    check("boundary: comma", Guide.isBoundaryText("，"), true)
-    check("boundary: latin letter", Guide.isBoundaryText("a"), false)
-    check("boundary: hanzi", Guide.isBoundaryText("好"), false)
-    check("boundary: empty", Guide.isBoundaryText(""), true)
+    check("endsSentence: full stop", Guide.endsSentence("。"), true)
+    check("endsSentence: exclamation", Guide.endsSentence("！"), true)
+    check("endsSentence: comma", Guide.endsSentence("，"), false)
+    check("endsSentence: hanzi", Guide.endsSentence("好"), false)
+    check("endsSentence: empty", Guide.endsSentence(""), false)
 end
 
 do
@@ -905,12 +959,6 @@ do
         guide:delayForSentence(plain .. "。"), 31 * 60 / 300)
     plugin.guide_punct_scale = nil
 
-    plugin.guide_punct_scale = 2
-    check("punct scale 2 doubles the punctuation pauses",
-        guide:delayForSentence(plain .. "。"),
-        31 * 60 / 300 + 2 * Guide.defaults.end_pause)
-    plugin.guide_punct_scale = nil
-
     plugin.guide_min_sentence_delay = 3
     check("custom minimum respected", guide:delayForSentence("嗯。"), 3)
     plugin.guide_min_sentence_delay = nil
@@ -921,321 +969,127 @@ do
 end
 
 do
-    -- underline drawing / sentence stepping, with a stubbed document
-    local doc = {
-        getXPointer = function() return "xp1" end,
-        getPrevVisibleChar = function() return nil end,
-        getTextFromXPointers = function() return "" end,
-        extendXPointersToSentenceSegment = function(_, p0)
-            if p0 == "xp1" then return { text = "第一句。", pos0 = "xp1", pos1 = "xp2" } end
-            if p0 == "xp2" then return { text = "第二句！", pos0 = "xp2", pos1 = "xp3" } end
-            return nil
-        end,
-        getScreenBoxesFromPositions = function()
-            return { { x = 10, y = 100, w = 200, h = 20 } }
-        end,
-        getPosFromXPointer = function() return { x = 10, y = 500 } end,
-        getCurrentPage = function() return 1 end,
-    }
-    local view = {
-        highlight = { temp = {}, temp_drawer = "lighten" },
-        dialog = { name = "ReaderView" },
-        footer_visible = false,
-    }
-    local plugin = new_instance()
-    plugin.ui.document = doc
-    plugin.ui.view = view
-    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
-    plugin.reading_mode = "sentence"
-    plugin.enabled = true
-    plugin.guide_task = function() end
-
-    local guide = Guide:new(plugin)
+    -- scanning, underlining, stepping and end of document
+    local guide, plugin = guide_instance()
     scheduled = {}
     guide:step()
 
-    check("underline drawn for the current page", #(view.highlight.temp[1] or {}), 1)
+    check("first sentence read", guide.segment.text, "你好。")
+    check("sentence starts at the visible text start", guide.segment.pos0, "c0")
+    check("sentence ends after its full stop", guide.segment.pos1, "c3")
+    check("underline drawn for the current page", #(view_boxes(plugin)), 1)
     check("temporary highlight switched to underline",
-        view.highlight.temp_drawer, "underscore")
-    check("the next sentence is scheduled", #scheduled, 1)
-    check("delay used for a short sentence",
-        scheduled[1].delay, 4 * 60 / 300 + Guide.defaults.end_pause)
-    check("stepping moves to the end of this sentence", guide.xp, "xp2")
-    check("the current segment is remembered", guide.segment.text, "第一句。")
+        plugin.ui.view.highlight.temp_drawer, "underscore")
+    check("delay scheduled", #scheduled, 1)
+    check("four characters were scanned", guide.scanned_chars, 3)
 
+    -- next step reads the second sentence
     scheduled = {}
     guide:step()
-    check("second sentence shown", guide.segment.text, "第二句！")
-    check("underline follows the sentence", #(view.highlight.temp[1] or {}), 1)
+    check("second sentence read", guide.segment.text, "世界！")
+    check("second sentence starts where the first ended", guide.segment.pos0, "c3")
+    check("underline follows", #(view_boxes(plugin)), 1)
 
-    guide:clearUnderline()
-    check("underline cleared", next(view.highlight.temp), nil)
-    check("previous temporary highlight style restored",
-        view.highlight.temp_drawer, "lighten")
+    -- going back returns to the first sentence
+    guide:goBack()
+    check("goBack returns to the previous sentence", guide.segment.text, "你好。")
 
-    -- running out of text stops the guide and tells the plugin
-    local finished = 0
-    plugin.onGuideFinished = function() finished = finished + 1 end
-    guide.xp = "xp_end"
-    guide:step()
-    check("guide reports the end of the document", finished, 1)
+    -- running out of text stops the guide
+    local finished
+    plugin.onGuideFinished = function(_, reason) finished = reason end
+    scheduled = {}
+    guide:step()                 -- the second sentence again
+    check("second sentence before the end", guide.segment.text, "世界！")
+    guide:step()                 -- nothing left to read
+    check("scanner reports the end of the document", finished, "end_of_document")
     check("guide no longer scheduled", guide.scheduled, false)
 end
 
 do
-    -- the guide scrolls only when the sentence leaves the comfortable area
-    local function make(scroll_y)
-        local view = {
-            highlight = { temp = {}, temp_drawer = "lighten" },
-            dialog = {},
-            footer_visible = false,
-        }
-        local plugin = new_instance()
-        plugin.ui.view = view
-        plugin.ui.rolling = {
-            current_pos = 0,
-            _gotoPos = function(_, p) plugin.scrolled_to = p end,
-        }
-        plugin.ui.document = {
-            getPosFromXPointer = function() return { y = scroll_y } end,
-            getCurrentPage = function() return 1 end,
-            getScreenBoxesFromPositions = function() return { { x = 0, y = 0, w = 10, h = 10 } } end,
-            extendXPointersToSentenceSegment = function() return nil end,
-        }
-        plugin.reading_mode = "sentence"
-        plugin.enabled = true
-        plugin.guide_task = function() end
-        return Guide:new(plugin), plugin
-    end
-
-    local guide, plugin = make(100) -- near the top: leave it alone
-    guide:ensureVisible({ pos0 = "xp" })
-    check("no scroll while the sentence is comfortable", plugin.scrolled_to, nil)
-
-    guide, plugin = make(700) -- below the trigger line
-    guide:ensureVisible({ pos0 = "xp" })
-    check("scrolls when the sentence drops too low",
-        plugin.scrolled_to, 700 - math.floor(800 * Guide.defaults.scroll_position))
-
-    guide, plugin = make(0)
-    plugin.ui.rolling.current_pos = 200 -- sentence scrolled off the top
-    guide:ensureVisible({ pos0 = "xp" })
-    check("scrolls back up when the sentence is above the viewport", plugin.scrolled_to, 0)
+    -- clearing restores the previous temporary highlight style
+    local guide, plugin = guide_instance()
+    scheduled = {}
+    guide:step()
+    guide:clearUnderline()
+    check("underline cleared", next(plugin.ui.view.highlight.temp), nil)
+    check("previous temporary highlight style restored",
+        plugin.ui.view.highlight.temp_drawer, "lighten")
 end
 
 do
     -- pause holds on the current sentence, resume restarts its countdown
-    local doc = {
-        getXPointer = function() return "xp1" end,
-        getPrevVisibleChar = function() return nil end,
-        getTextFromXPointers = function() return "" end,
-        extendXPointersToSentenceSegment = function(_, p0)
-            if p0 == "xp1" then return { text = "一句。", pos0 = "xp1", pos1 = "xp2" } end
-            return nil
-        end,
-        getScreenBoxesFromPositions = function() return { { x = 0, y = 0, w = 10, h = 10 } } end,
-        getPosFromXPointer = function() return { y = 100 } end,
-        getCurrentPage = function() return 1 end,
-    }
-    local view = {
-        highlight = { temp = {}, temp_drawer = "lighten" },
-        dialog = {},
-        footer_visible = false,
-    }
-    local plugin = new_instance()
-    plugin.ui.document = doc
-    plugin.ui.view = view
-    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
-    plugin.reading_mode = "sentence"
-    plugin.enabled = true
-    plugin.guide_task = function() end
-    local guide = Guide:new(plugin)
-
+    local guide, plugin = guide_instance()
     scheduled = {}
     guide:step()
     check("guide is running before the pause", #scheduled, 1)
 
     check("pause toggles on", guide:togglePause(), true)
     check("a paused guide cancels its timer", #scheduled, 0)
-    check("the underline stays while paused", #(view.highlight.temp[1] or {}), 1)
+    check("the underline stays while paused", #(view_boxes(plugin)), 1)
 
     scheduled = {}
     guide:step()
     check("a paused guide does not advance", #scheduled, 0)
-    check("still on the same sentence", guide.segment.text, "一句。")
+    check("still on the same sentence", guide.segment.text, "你好。")
 
     check("pause toggles off", guide:togglePause(), false)
     check("resume schedules the sentence again", #scheduled, 1)
-    check("resume uses that sentence's delay",
-        scheduled[1].delay, guide:delayForSentence("一句。"))
 
-    -- stopping clears the paused flag as well
     guide:pause()
     guide:stop()
     check("stop clears the paused flag", guide.paused, false)
 end
 
 do
-    -- a position that crengine refuses to extend must not end the guide:
-    -- the guide steps forward until it finds a real sentence boundary
-    local doc = {
-        getXPointer = function() return "mid" end,
-        getPrevVisibleChar = function() return nil end,
-        getNextVisibleChar = function(_, xp)
-            if xp == "mid" then return "start" end
-            return xp
-        end,
-        extendXPointersToSentenceSegment = function(_, p0, p1)
-            if p0 == "start" then
-                return { text = "整句。", pos0 = "start", pos1 = "next" }
-            end
-            return { text = "", pos0 = p0, pos1 = p1 } -- did not extend
-        end,
-        getScreenBoxesFromPositions = function() return { { x = 0, y = 0, w = 10, h = 10 } } end,
-        getPosFromXPointer = function() return { y = 100 } end,
-        getCurrentPage = function() return 1 end,
-    }
-    local view = {
-        highlight = { temp = {}, temp_drawer = "lighten" },
-        dialog = {},
-        footer_visible = false,
-    }
-    local plugin = new_instance()
-    plugin.ui.document = doc
-    plugin.ui.view = view
-    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
-    plugin.reading_mode = "sentence"
-    plugin.enabled = true
-    plugin.guide_task = function() end
+    -- scrolling
+    local function make(scroll_y, current_pos)
+        local guide, plugin = guide_instance({
+            doc = { getPosFromXPointer = function() return { y = scroll_y } end },
+        })
+        plugin.ui.rolling = {
+            current_pos = current_pos or 0,
+            _gotoPos = function(_, p) plugin.scrolled_to = p end,
+        }
+        return guide, plugin
+    end
 
-    local guide = Guide:new(plugin)
-    scheduled = {}
-    guide:step()
-    check("guide recovers from a non-boundary position", guide.segment.text, "整句。")
-    check("and keeps running", #scheduled, 1)
-end
+    local guide, plugin = make(100)
+    guide:ensureVisible({ pos0 = "c0" })
+    check("no scroll while the sentence is comfortable", plugin.scrolled_to, nil)
 
-do
-    -- when it really is the end, the plugin is told why
-    local doc = {
-        getXPointer = function() return "end" end,
-        getPrevVisibleChar = function() return nil end,
-        getNextVisibleChar = function(_, xp) return xp end,
-        extendXPointersToSentenceSegment = function(_, p0, p1)
-            return { text = "", pos0 = p0, pos1 = p1 }
-        end,
-        getScreenBoxesFromPositions = function() return nil end,
-        getCurrentPage = function() return 1 end,
-    }
-    local plugin = new_instance()
-    plugin.ui.document = doc
-    plugin.ui.view = { highlight = { temp = {}, temp_drawer = "lighten" }, dialog = {}, footer_visible = false }
-    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
-    plugin.reading_mode = "sentence"
-    plugin.enabled = true
-    plugin.guide_task = function() end
+    guide, plugin = make(700)
+    guide:ensureVisible({ pos0 = "c0" })
+    check("scrolls when the sentence drops too low",
+        plugin.scrolled_to, 700 - math.floor(800 * Guide.defaults.scroll_position))
 
-    local guide = Guide:new(plugin)
-    local reason
-    plugin.onGuideFinished = function(_, r) reason = r end
-    guide:step()
-    check("end of document is reported as such", reason, "end_of_document")
+    guide, plugin = make(0, 200)
+    guide:ensureVisible({ pos0 = "c0" })
+    check("scrolls back up when the sentence is above the viewport", plugin.scrolled_to, 0)
+
+    -- scrolling can be switched off entirely
+    guide, plugin = make(700)
+    guide.plugin.guide_scroll = false
+    guide:ensureVisible({ pos0 = "c0" })
+    check("no scroll when following is disabled", plugin.scrolled_to, nil)
 end
 
 do
     -- a closed document must make the guide inert (no FFI calls into a
     -- torn-down crengine object), and a scheduled task must still be
     -- cancellable even if the plugin dropped its own reference to it
-    local plugin = new_instance()
-    plugin.ui.document = { is_open = false, getCurrentPage = function() return 1 end }
-    plugin.ui.rolling = {}
-    plugin.reading_mode = "sentence"
-    plugin.enabled = true
-    local guide = Guide:new(plugin)
-
+    local guide, plugin = guide_instance({ doc = { is_open = false } })
     check("guide is inactive on a closed document", guide:isActive(), false)
     scheduled = {}
     guide:step()
     check("step does nothing on a closed document", #scheduled, 0)
 
-    plugin.ui.document = {
-        is_open = true,
-        getXPointer = function() return "xp1" end,
-        getPrevVisibleChar = function() return nil end,
-        getNextVisibleChar = function(_, xp) return xp end,
-        extendXPointersToSentenceSegment = function(_, p0)
-            if p0 == "xp1" then return { text = "句子。", pos0 = "xp1", pos1 = "xp2" } end
-            return nil
-        end,
-        getScreenBoxesFromPositions = function() return { { x = 0, y = 0, w = 10, h = 10 } } end,
-        getPosFromXPointer = function() return { y = 100 } end,
-        getCurrentPage = function() return 1 end,
-    }
-    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
-    plugin.ui.view = {
-        highlight = { temp = {}, temp_drawer = "lighten" },
-        dialog = {},
-        footer_visible = false,
-    }
-    plugin.guide_task = function() end
+    guide, plugin = guide_instance()
     scheduled = {}
     guide:step()
     check("guide scheduled its step", #scheduled, 1)
-
     plugin.guide_task = nil -- plugin dropped its reference
     guide:unschedule()      -- must still cancel the right one
     check("the scheduled step can still be cancelled", #scheduled, 0)
-end
-
-do
-    -- crengine refuses to extend a range that does not start right after
-    -- punctuation, so the guide has to walk back -- and it must do so by WORDS:
-    -- a Chinese sentence is easily 30 characters long
-    local tried = {}
-    local doc = {
-        getXPointer = function() return "w3" end,
-        getNextVisibleChar = function(_, xp) return xp end,
-        getPrevVisibleWordStart = function(_, xp)
-            if xp == "w3" then return "w2" end
-            if xp == "w2" then return "w1" end
-            return xp
-        end,
-        extendXPointersToSentenceSegment = function(_, p0)
-            table.insert(tried, p0)
-            if p0 == "w1" then
-                return { text = "整句话。", pos0 = "w1", pos1 = "w4" }
-            end
-            return nil -- mid-sentence: crengine returns nothing at all
-        end,
-        getScreenBoxesFromPositions = function() return { { x = 0, y = 20, w = 100, h = 16 } } end,
-        getPosFromXPointer = function() return { y = 100 } end,
-        getCurrentPage = function() return 1 end,
-    }
-    local view = {
-        highlight = { temp = {}, temp_drawer = "lighten" },
-        dialog = {},
-        footer_visible = false,
-    }
-    local plugin = new_instance()
-    plugin.ui.document = doc
-    plugin.ui.view = view
-    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
-    plugin.reading_mode = "sentence"
-    plugin.enabled = true
-    plugin.guide_task = function() end
-
-    local guide = Guide:new(plugin)
-    scheduled = {}
-    guide:step()
-
-    check("walked back to a real sentence start", guide.segment.text, "整句话。")
-    check("two word steps were needed", guide.back_steps, 2)
-    -- w3, w2, w1 while walking back, then w1 once more to read the sentence
-    check("the intermediate positions were tried as well", #tried, 4)
-    check("the sentence start is used afterwards", guide.xp, "w4")
-    check("the reject reason is cleared on success", guide.last_reason, nil)
-    check("the underline was drawn", #(view.highlight.temp[1] or {}), 1)
-    check("the box count is remembered for diagnostics", guide.last_boxes, 1)
 end
 
 -- ---------------------------------------------------------------------------

@@ -48,8 +48,9 @@ function Guide:new(plugin)
         plugin = plugin,
         scheduled = false,
         paused = false,
+        history = nil,        -- xpointers of the sentences shown, for goBack()
         xp = nil,             -- xpointer the next sentence starts at
-        segment = nil,        -- { text, pos0, pos1, sboxes } of the current sentence
+        segment = nil,        -- { text, pos0, pos1 } of the current sentence
         saved_temp_drawer = nil,
     }, self)
 end
@@ -83,8 +84,11 @@ end
 function Guide:isSupported()
     local ui = self.plugin and self.plugin.ui
     if not ui or not ui.document or not ui.rolling then return false end
-    return ui.document.extendXPointersToSentenceSegment ~= nil
-        and ui.document.getScreenBoxesFromPositions ~= nil
+    local doc = ui.document
+    return doc.getTextFromPositions ~= nil
+        and doc.getNextVisibleChar ~= nil
+        and doc.getTextFromXPointers ~= nil
+        and doc.getScreenBoxesFromPositions ~= nil
 end
 
 function Guide:isActive()
@@ -130,118 +134,99 @@ function Guide:delayForSentence(text)
     return delay
 end
 
---- Is this snippet a character a sentence may start after?
---- (whitespace, or punctuation -- which is how crengine itself decides)
-function Guide.isBoundaryText(chunk)
-    if not chunk or chunk == "" then return true end
-    local cp = Count.decode(chunk, 1, #chunk)
-    if not cp then return true end
-    return Count.isWhitespaceCp(cp) or Count.punctClassOf(cp) ~= nil
-end
-
 -- ---------------------------------------------------------------------------
 -- Sentence lookup
+--
+-- Deliberately NOT document:extendXPointersToSentenceSegment(): it only works
+-- when the position sits right after punctuation or whitespace and returns
+-- nothing otherwise, and walking back to such a position turned out to be
+-- unreliable on real books (40 words back still found nothing on a Chinese
+-- novel).  Instead the guide scans forward from the start of the visible text
+-- and stops at the first sentence-ending punctuation.  That only uses
+-- getTextFromPositions / getNextVisibleChar / getTextFromXPointers, all of
+-- which KOReader itself uses.
 -- ---------------------------------------------------------------------------
 
---- Try to read the sentence starting at this xpointer.
----
---- crengine only extends a range to a sentence when the position really is a
---- sentence boundary, so "did it extend?" doubles as our boundary test -- far
---- more reliable than inspecting the surrounding characters ourselves.
--- @treturn table|nil segment, @treturn string|nil reason when there is none
-function Guide:trySentence(xp)
+--- Where the visible text starts (xpointer of the first word on screen).
+-- @treturn string|nil xpointer of the visible text start
+function Guide:visibleStart()
     local doc = self.plugin.ui.document
-    if not xp then
-        self.last_reason = "no_position"
-        return nil, "no_position"
-    end
-    local ok, seg = pcall(doc.extendXPointersToSentenceSegment, doc, xp, xp)
+    local ok, res = pcall(doc.getTextFromPositions, doc,
+        { x = 0, y = 0 },
+        { x = Screen:getWidth(), y = Screen:getHeight() },
+        true)
     if not ok then
         self.last_reason = "call_failed"
-        self:trace("extendXPointersToSentenceSegment failed: %s", tostring(seg))
-        return nil, "failed"
+        self:trace("getTextFromPositions failed: %s", tostring(res))
+        return nil
     end
-    if not seg or not seg.pos0 or not seg.pos1 then
-        -- crengine returns nothing at all when the position is not a sentence
-        -- start (it does not return an empty range)
-        self.last_reason = "not_a_sentence_start"
-        return nil, "empty"
+    if not res or not res.pos0 or res.pos0 == "" then
+        self.last_reason = "no_visible_text"
+        return nil
     end
-    if seg.pos1 == seg.pos0 then
-        self.last_reason = "not_a_sentence_start"
-        return nil, "not_a_boundary"
+    return res.pos0
+end
+
+--- Does this one-character chunk end a sentence?
+function Guide.endsSentence(chunk)
+    if not chunk or chunk == "" then return false end
+    local cp = Count.decode(chunk, 1, #chunk)
+    if not cp then return false end
+    return Count.punctClassOf(cp) == "sentence_end"
+end
+
+--- Scan forward from xp until a sentence ends.
+-- @tparam string xp start xpointer
+-- @tparam[opt=400] number max_chars hard limit, so a paragraph without any
+--        punctuation cannot turn into an endless scan
+-- @treturn table|nil { text, pos0, pos1 }
+function Guide:scanSentence(xp, max_chars)
+    local doc = self.plugin.ui.document
+    local limit = max_chars or 400
+    local parts = {}
+    local cur = xp
+    local count = 0
+    for _ = 1, limit do
+        local ok, nxt = pcall(doc.getNextVisibleChar, doc, cur)
+        if not ok or not nxt or nxt == cur or nxt == "" then break end
+        local ok2, chunk = pcall(doc.getTextFromXPointers, doc, cur, nxt)
+        if not ok2 or not chunk or chunk == "" then break end
+        parts[#parts + 1] = chunk
+        count = count + 1
+        cur = nxt
+        if Guide.endsSentence(chunk) then break end
+    end
+    if count == 0 then
+        self.last_reason = "no_text_scanned"
+        return nil
     end
     self.last_reason = nil
-    return seg
+    self.scanned_chars = count
+    return { pos0 = xp, pos1 = cur, text = table.concat(parts) }
 end
 
---- Walk backwards until crengine agrees this is a sentence start, so that the
---- first sentence shown is a complete one.
----
---- Backwards by WORD, not by character: crengine refuses to extend a range
---- unless the position sits right after punctuation or whitespace, and a
---- Chinese sentence is easily 30 characters long.  Stepping character by
---- character ran out of budget long before reaching the start of the sentence,
---- so the very first step gave up and looked like "end of document".
-function Guide:findSentenceStart(xp)
-    local doc = self.plugin.ui.document
-    local cur = xp
-    local steps = 0
-    for _ = 1, 40 do
-        local seg = self:trySentence(cur)
-        if seg then
-            self.back_steps = steps
-            if steps > 0 then
-                self:trace("sentence start found %d word(s) back", steps)
-            end
-            return seg.pos0 or cur
-        end
-        local ok, prev = pcall(doc.getPrevVisibleWordStart, doc, cur)
-        if not ok or not prev or prev == cur or prev == "" then break end
-        cur = prev
-        steps = steps + 1
-    end
-    self.back_steps = steps
-    self:trace("no sentence start found after %d word(s) back", steps)
-    return cur
-end
-
---- The sentence starting at self.xp (or at the current position the first time).
+--- The sentence starting at self.xp (at the visible text start the first time).
 -- @treturn table|nil segment
 function Guide:currentSegment()
-    local doc = self.plugin.ui.document
     if not self.xp then
-        local ok, here = pcall(doc.getXPointer, doc)
-        if not ok or not here then
+        local start = self:visibleStart()
+        if not start then
             self.stop_reason = "no_position"
             return nil
         end
-        self.xp = self:findSentenceStart(here)
+        self.xp = start
+        self:trace("starting at the visible text start")
     end
 
-    -- Usually self.xp is a sentence start and the first try succeeds.  When it
-    -- does not (crengine's idea of a boundary can differ from ours, e.g. right
-    -- after a comma), step forward a little instead of declaring the book
-    -- finished -- that used to stop the guide on the first sentence.
-    local xp = self.xp
-    for _ = 1, 8 do
-        local seg, reason = self:trySentence(xp)
-        if seg then
-            self.xp = xp
-            return seg
-        end
-        self.last_reason = reason
-        local ok, nxt = pcall(doc.getNextVisibleChar, doc, xp)
-        if not ok or not nxt or nxt == xp or nxt == "" then break end
-        xp = nxt
+    local seg = self:scanSentence(self.xp, 400)
+    if not seg then
+        self.stop_reason = "end_of_document"
+        self:trace("nothing to read from %s", tostring(self.xp))
+        return nil
     end
-
-    -- We walked to the end of the visible text without finding a sentence.
-    self.stop_reason = "end_of_document"
-    self:trace("no sentence found at %s (last reason: %s)",
-        tostring(self.xp), tostring(self.last_reason))
-    return nil
+    return seg
 end
+
 
 --- The screen boxes of a segment, one per displayed line.
 function Guide:sentenceBoxes(seg)
@@ -398,14 +383,16 @@ function Guide:step()
     end
 
     self.segment = seg
-    logger.dbg("AutoWords guide: sentence", tostring(seg.pos0), "->", tostring(seg.pos1),
-        "(", #(seg.text or ""), "bytes )")
+    -- remember where this sentence started, so "previous sentence" can go back
+    self.history = self.history or {}
+    table.insert(self.history, seg.pos0)
+    while #self.history > 50 do table.remove(self.history, 1) end
+    self:trace("sentence (%d chars) from %s", #(seg.text or ""), tostring(seg.pos0))
     -- scroll first: scrolling clears the temporary highlight and moves the text
     self:ensureVisible(seg)
     self:showUnderline(seg)
 
     local delay = self:delayForSentence(seg.text or "")
-    logger.dbg("AutoWords guide: sentence", #(seg.text or ""), "bytes ->", delay, "s")
     self.xp = seg.pos1
     self:scheduleIn(delay)
 end
@@ -417,13 +404,16 @@ function Guide:goForward()
 end
 
 --- Go back to the previous sentence (manual "previous sentence").
+--- Uses the history of sentences shown, which is far more reliable than trying
+--- to walk backwards through the document.
 function Guide:goBack()
     self:unschedule()
-    local doc = self.plugin.ui.document
-    local from = (self.segment and self.segment.pos0) or self.xp or doc:getXPointer()
-    local prev = doc:getPrevVisibleChar(from)
-    if not prev or prev == from then return end
-    self.xp = self:findSentenceStart(prev)
+    local history = self.history
+    if not history or #history == 0 then return end
+    table.remove(history)                -- drop the sentence being shown
+    local previous = table.remove(history)
+    if not previous then return end
+    self.xp = previous
     self:step()
 end
 
