@@ -947,7 +947,8 @@ do
     -- mapping sentences onto the line boxes
     local text = PAGE_TEXT
     local lines = Guide.splitLines(text)
-    local sentences = Guide.attachBoxes(Guide.splitSentences(text), lines, PAGE_BOXES)
+    local sentences = Guide.attachBoxes(Guide.splitSentences(text), lines,
+        PAGE_BOXES, text)
 
     check("three sentences mapped", #sentences, 3)
     check("the first sentence is on line 1", sentences[1].lines[1], 1)
@@ -956,6 +957,22 @@ do
     check("with that line's box",
         sentences[3].boxes[1] and sentences[3].boxes[1].y, 40)
 
+    -- line 1 holds two sentences, so each box covers only part of the line
+    check_true("a sentence ending mid-line gets a trimmed box",
+        sentences[1].boxes[1].w < PAGE_BOXES[1].w)
+    check("the first sentence starts at the left edge", sentences[1].boxes[1].x, 0)
+    check_true("and the second one starts to its right",
+        sentences[2].boxes[1].x > sentences[1].boxes[1].x)
+    check_true("the two boxes do not overlap",
+        sentences[1].boxes[1].x + sentences[1].boxes[1].w
+            <= sentences[2].boxes[1].x + 0.001)
+
+    -- a sentence that fills its whole line keeps the untouched box
+    check("a sentence filling the line is not trimmed",
+        sentences[3].boxes[1].w, PAGE_BOXES[2].w)
+    check("and it keeps the full line height",
+        sentences[3].boxes[1].h, PAGE_BOXES[2].h)
+
     -- a sentence covering two lines gets both boxes
     local two_line = "一二三四五六七八九十。\n下一句。"
     local boxes = {
@@ -963,8 +980,16 @@ do
         { x = 0, y = 30, w = 100, h = 16 },
     }
     local mapped = Guide.attachBoxes(Guide.splitSentences(two_line),
-        Guide.splitLines(two_line), boxes)
+        Guide.splitLines(two_line), boxes, two_line)
     check_true("a sentence can cover more than one line", mapped[1].lines[2] ~= nil)
+
+    -- characters are counted per code point, not per byte
+    check("countChars: three hanzi", Guide.countChars("你好。", 1, 9), 3)
+    check("countChars: empty range", Guide.countChars("你好。", 2, 1), 0)
+
+    -- without the text to measure, the full line is kept (the old behaviour)
+    check("no trimming without the text",
+        Guide.trimBox(PAGE_BOXES[1], lines[1], { from = 1, to = 10 }), nil)
 end
 
 do

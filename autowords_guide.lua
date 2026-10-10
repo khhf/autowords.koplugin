@@ -310,15 +310,68 @@ function Guide.splitSentences(text)
     return sentences
 end
 
+--- How many characters are in this byte range (inclusive)?
+-- @tparam string text
+-- @tparam number from first byte
+-- @tparam number to last byte
+-- @treturn number character count
+function Guide.countChars(text, from, to)
+    local n = 0
+    local i = from
+    while i <= to do
+        local cp, nxt = Count.decode(text, i, to + 1)
+        if not cp then break end
+        n = n + 1
+        i = nxt
+    end
+    return n
+end
+
+--- Trim a whole-line box down to the part of it a sentence covers.
+---
+--- Chinese text is set in a monospaced font, where the share of characters is
+--- the share of the width; for proportional scripts this is an approximation.
+-- @treturn table|nil trimmed box, or nil when the whole line is covered
+function Guide.trimBox(box, line, sentence, text)
+    if not text or type(box.w) ~= "number" or box.w <= 0 then return nil end
+
+    local line_chars = Guide.countChars(text, line.from, line.to)
+    if line_chars <= 0 then return nil end
+
+    local overlap_from = math.max(sentence.from, line.from)
+    local overlap_to = math.min(sentence.to - 1, line.to)
+    if overlap_to < overlap_from then return nil end
+
+    local inside = Guide.countChars(text, overlap_from, overlap_to)
+    if inside >= line_chars then return nil end -- the sentence fills the line
+
+    local before = Guide.countChars(text, line.from, overlap_from - 1)
+    local from_frac = before / line_chars
+    local to_frac = (before + inside) / line_chars
+
+    return {
+        x = box.x + box.w * from_frac,
+        y = box.y,
+        w = box.w * (to_frac - from_frac),
+        h = box.h,
+    }
+end
+
 --- Which lines does each sentence cover, and which boxes belong to them.
 ---
 --- The page text and the line boxes come from the same call and line up one to
 --- one, so a sentence's line range gives exactly the boxes to underline.
+---
+--- Those boxes span a whole line, though, and a sentence usually ends part way
+--- through one -- underlining the full line made the first words of the NEXT
+--- sentence look like they belonged to this one.  So the first and last line of
+--- each sentence are trimmed to the part it really covers.
 -- @tparam table sentences from splitSentences()
 -- @tparam table lines from splitLines()
 -- @tparam table boxes screen boxes, one per line
+-- @tparam string text the page text those offsets refer to
 -- @treturn table sentences with `boxes` and `lines` filled in
-function Guide.attachBoxes(sentences, lines, boxes)
+function Guide.attachBoxes(sentences, lines, boxes, text)
     local out = {}
     for _, sentence in ipairs(sentences) do
         local first, last
@@ -333,7 +386,10 @@ function Guide.attachBoxes(sentences, lines, boxes)
         if first and last then
             for i = first, last do
                 local box = boxes[i]
-                if box then sentence_boxes[#sentence_boxes + 1] = box end
+                if box then
+                    local trimmed = Guide.trimBox(box, lines[i], sentence, text)
+                    sentence_boxes[#sentence_boxes + 1] = trimmed or box
+                end
             end
         end
 
@@ -410,7 +466,8 @@ function Guide:loadPage()
     end
 
     if #lines == #boxes then
-        self.page_sentences = Guide.attachBoxes(Guide.splitSentences(text), lines, boxes)
+        self.page_sentences = Guide.attachBoxes(Guide.splitSentences(text),
+            lines, boxes, text)
     else
         -- The two do not line up on this document: underline line by line,
         -- which still follows the reading, just with coarser granularity.
