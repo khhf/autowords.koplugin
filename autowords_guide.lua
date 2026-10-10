@@ -50,6 +50,8 @@ function Guide:new(plugin)
         scheduled = false,
         paused = false,
         history = nil,        -- xpointers of the sentences shown, for goBack()
+        turn_pending = false, -- a page turn is already queued
+        visible_boxes = nil,  -- screen boxes of the current sentence
         xp = nil,             -- xpointer the next sentence starts at
         segment = nil,        -- { text, pos0, pos1 } of the current sentence
         saved_temp_drawer = nil,
@@ -447,6 +449,8 @@ function Guide:showUnderline(seg)
     local view = self.plugin.ui.view
     if not view or not view.highlight then return end
     local boxes = self:sentenceBoxes(seg)
+    -- remember them even on failure, so follow() never works from stale boxes
+    self.visible_boxes = boxes
     if not boxes then return end
 
     if self.saved_temp_drawer == nil then
@@ -489,142 +493,133 @@ function Guide.selftestPath()
 end
 
 -- ---------------------------------------------------------------------------
--- Scrolling
+-- Following the sentence
+--
+-- Everything here works from the SCREEN boxes of the sentence -- the same ones
+-- the underline is drawn from.  It used to use
+-- document:getPosFromXPointer(), which returns a DOCUMENT coordinate (tens of
+-- thousands of pixels into the book); comparing that against the screen height
+-- made every sentence look like it had fallen off the page, so the guide turned
+-- the page over and over and took the reader down with it.
 -- ---------------------------------------------------------------------------
 
---- Keep the current sentence comfortably on screen: if it fell below the
---- Follow the sentence being read.
----
---- Two very different mechanisms, picked by the view mode:
----
----  * Paged mode ("page"): the sentence is followed by turning the page, the
----    same way a reader would -- the underline can only ever be on the page
----    that is currently shown, so when the sentence leaves the visible part of
----    the page the view has to move on.
----  * Scroll mode ("scroll"): the view is nudged so the sentence sits at the
----    configured fraction of the screen.
----
---- Following is the most invasive thing the guide does (it drives
---- ReaderRolling, which touches page layout, the footer and the document
---- position), so every precondition is checked and every failure is swallowed:
---- a guide that does not follow is still useful, a guide that takes the reader
---- down with it is not.
-function Guide:ensureVisible(seg)
-    if self.plugin.guide_scroll == false then return end
+--- The vertical range of the screen that text can occupy.
+-- @treturn number top edge, @treturn number bottom edge
+function Guide:visibleArea()
     local ui = self.plugin.ui
-    local rolling = ui.rolling
-    local doc = ui.document
-    if not rolling then return end
-
-    self:stage("getPosFromXPointer (locate the sentence)")
-    local ok, pos = pcall(doc.getPosFromXPointer, doc, seg.pos0)
-    if not ok or not pos or type(pos.y) ~= "number" then
-        self:trace("not following: cannot locate the sentence")
-        return
-    end
-
-    local view = ui.view
-    local view_mode = (view and view.view_mode) or "page"
-    self:trace("sentence at y=%d, view mode is %s", pos.y, view_mode)
-
-    if view_mode == "page" then
-        self:followInPageMode(pos)
-    else
-        self:followInScrollMode(pos)
-    end
-end
-
---- Paged mode: is the sentence inside the part of the page that is shown?
-function Guide:followInPageMode(pos)
-    local ui = self.plugin.ui
-    local doc = ui.document
-
-    -- Where the visible area starts and how tall it is.  getVisiblePageCount()
-    -- is 1 or 2 depending on the layout, and the document reports the header
-    -- height it reserved.
-    local ok_top, top = pcall(doc.getHeaderHeight, doc)
-    if not ok_top or type(top) ~= "number" then top = 0 end
-
     local view = ui.view
     local footer_h = 0
     if view and view.footer_visible and view.footer and view.footer.getHeight then
-        local ok2, h = pcall(view.footer.getHeight, view.footer)
-        if ok2 and type(h) == "number" then footer_h = h end
+        local ok, h = pcall(view.footer.getHeight, view.footer)
+        if ok and type(h) == "number" then footer_h = h end
     end
-
-    local page_h = (ui.dimen and ui.dimen.h) or Screen:getHeight()
-    local bottom = page_h - footer_h
-    if bottom <= top then return end
-
-    -- The underline is drawn from the line boxes; a sentence whose first line
-    -- already sits below the visible bottom is not readable any more.
-    local margin = Screen:scaleBySize(4)
-    if pos.y + margin < bottom then
-        return -- still on screen, nothing to do
+    local header_h = 0
+    local doc = ui.document
+    if doc and doc.getHeaderHeight then
+        local ok, h = pcall(doc.getHeaderHeight, doc)
+        if ok and type(h) == "number" then header_h = h end
     end
-
-    self:trace("the sentence left the visible page (%d >= %d): turning the page",
-        pos.y, bottom)
-    local ok3, err = pcall(function()
-        self.plugin.ui:handleEvent(Event:new("GotoViewRel", 1))
-    end)
-    if not ok3 then
-        self:trace("turning the page failed: %s", tostring(err))
-        return false
-    end
-    return true
+    return header_h, Screen:getHeight() - footer_h
 end
 
---- Scroll mode: nudge the view so the sentence sits at the configured fraction.
-function Guide:followInScrollMode(pos)
+--- Keep the sentence being read on screen.
+---
+--- Paged mode: the underline can only sit on a page that is showing, so once
+--- the sentence drops below the visible page the view moves on.
+--- Scroll mode: the sentence is nudged to the configured fraction of the
+--- screen.
+-- @tparam table boxes screen boxes of the sentence, one per displayed line
+function Guide:follow(boxes)
+    if self.plugin.guide_scroll == false then return end
+    if not boxes or #boxes == 0 then return end
+    local ui = self.plugin.ui
+    local view = ui.view
+    if not view then return end
+
+    local top, bottom = self:visibleArea()
+    if bottom <= top then return end
+
+    local first, last = boxes[1], boxes[#boxes]
+    if type(first.y) ~= "number" or type(last.y) ~= "number" then return end
+    local sentence_top = first.y
+    local sentence_bottom = last.y + (last.h or 0)
+    self.last_sentence_top = sentence_top
+    self.last_sentence_bottom = sentence_bottom
+    self:trace("sentence occupies y=%d..%d, text area is %d..%d",
+        sentence_top, sentence_bottom, top, bottom)
+
+    if (view.view_mode or "page") == "page" then
+        -- Only turn when the sentence STARTS below the visible area.  A
+        -- sentence that merely runs over the bottom edge is the one being read
+        -- right now, and turning the page would take it away mid-read; the
+        -- following sentence triggers the turn instead.
+        if sentence_top < bottom then
+            return
+        end
+        self:turnPage()
+    else
+        self:scrollTo(sentence_top, top, bottom)
+    end
+end
+
+--- Move on to the next page.
+---
+--- Never synchronously: this runs inside a UIManager timer callback, and turning
+--- the page from there re-enters the layout and the repaint while the timer is
+--- still on the stack.  One turn at a time, too -- otherwise a sentence that
+--- stays off-page would queue turns forever.
+function Guide:turnPage()
+    if self.turn_pending then return end
+    self.turn_pending = true
+    self:trace("the sentence left the visible page: turning it")
+    UIManager:nextTick(function()
+        self.turn_pending = false
+        if not self:isActive() then return end
+        local ok, err = pcall(function()
+            self.plugin.ui:handleEvent(Event:new("GotoViewRel", 1))
+        end)
+        if not ok then
+            self:trace("turning the page failed: %s", tostring(err))
+        end
+    end)
+end
+
+--- Scroll the sentence to the configured fraction of the screen.
+function Guide:scrollTo(sentence_top, top, bottom)
     local ui = self.plugin.ui
     local rolling = ui.rolling
-    local doc = ui.document
-    if not doc.getPosFromXPointer or not rolling._gotoPos then return end
+    if not rolling or not rolling._gotoPos then return end
 
-    -- ReaderRolling keeps its scroll offset here; without a sane number any
-    -- arithmetic below is meaningless, and _gotoPos() would be called with
-    -- garbage.
+    local usable_h = bottom - top
+    local trigger = top + usable_h * self:setting("scroll_trigger")
+    if sentence_top >= top and sentence_top <= trigger then
+        return -- comfortably placed
+    end
+
+    -- ReaderRolling's offset and the sentence position are both document
+    -- coordinates, so their difference is what has to move.
     local current = rolling.current_pos
     if type(current) ~= "number" then
         self:trace("not scrolling: current_pos is %s", tostring(current))
         return
     end
-
-    local view = ui.view
-    local footer_h = 0
-    if view and view.footer_visible and view.footer and view.footer.getHeight then
-        local ok2, h = pcall(view.footer.getHeight, view.footer)
-        if ok2 and type(h) == "number" then footer_h = h end
-    end
-    local usable_h = Screen:getHeight() - footer_h
-    if usable_h <= 0 then return end
-
-    local screen_y = pos.y - current
-    local trigger = usable_h * self:setting("scroll_trigger")
-    if screen_y >= 0 and screen_y <= trigger then
-        return -- already comfortably placed
-    end
-
-    -- Never scroll before the document has been scrolled at all: at the very
-    -- top there is nothing to gain, and asking ReaderRolling to move while it
-    -- is still settling is what took the process down.
-    if current <= 0 and pos.y <= 0 then
+    if current <= 0 and sentence_top <= top then
         self:trace("not scrolling: already at the top of the document")
         return
     end
 
-    local target_y = math.floor(usable_h * self:setting("scroll_position"))
-    local new_pos = pos.y - target_y
+    local target = top + math.floor(usable_h * self:setting("scroll_position"))
+    local new_pos = current + (sentence_top - target)
     if new_pos < 0 then new_pos = 0 end
     if new_pos == current then return end
 
-    self:stage("scrolling to %d (sentence was at %d)", new_pos, screen_y)
-    local ok3, err = pcall(rolling._gotoPos, rolling, new_pos, false)
-    if not ok3 then
+    self:stage("scrolling to %d", new_pos)
+    local ok, err = pcall(rolling._gotoPos, rolling, new_pos, false)
+    if not ok then
         self:trace("scrolling failed: %s", tostring(err))
     end
 end
+
 
 -- ---------------------------------------------------------------------------
 -- The loop
@@ -680,9 +675,9 @@ function Guide:step()
     table.insert(self.history, seg.pos0)
     while #self.history > 50 do table.remove(self.history, 1) end
     self:trace("sentence (%d chars) from %s", #(seg.text or ""), tostring(seg.pos0))
-    -- scroll first: scrolling clears the temporary highlight and moves the text
-    self:ensureVisible(seg)
+    -- underline first: it computes the screen boxes that follow() needs
     self:showUnderline(seg)
+    self:follow(self.visible_boxes)
 
     local delay = self:delayForSentence(seg.text or "")
     self.xp = seg.pos1
@@ -720,6 +715,7 @@ end
 
 function Guide:stop()
     self:unschedule()
+    self.turn_pending = false
     self.paused = false
     self.xp = nil
     self.segment = nil

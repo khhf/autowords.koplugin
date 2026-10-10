@@ -1073,41 +1073,6 @@ do
 end
 
 do
-    -- scrolling
-    local function make(scroll_y, current_pos)
-        local guide, plugin = guide_instance({
-            doc = { getPosFromXPointer = function() return { y = scroll_y } end },
-            view_mode = "scroll",
-        })
-        plugin.guide_scroll = true
-        plugin.ui.rolling = {
-            current_pos = current_pos or 0,
-            _gotoPos = function(_, p) plugin.scrolled_to = p end,
-        }
-        return guide, plugin
-    end
-
-    local guide, plugin = make(100)
-    guide:ensureVisible({ pos0 = "c0" })
-    check("no scroll while the sentence is comfortable", plugin.scrolled_to, nil)
-
-    guide, plugin = make(700, 100)
-    guide:ensureVisible({ pos0 = "c0" })
-    check("scrolls when the sentence drops too low",
-        plugin.scrolled_to, 700 - math.floor(800 * Guide.defaults.scroll_position))
-
-    guide, plugin = make(0, 200)
-    guide:ensureVisible({ pos0 = "c0" })
-    check("scrolls back up when the sentence is above the viewport", plugin.scrolled_to, 0)
-
-    -- scrolling can be switched off entirely
-    guide, plugin = make(700)
-    guide.plugin.guide_scroll = false
-    guide:ensureVisible({ pos0 = "c0" })
-    check("no scroll when following is disabled", plugin.scrolled_to, nil)
-end
-
-do
     -- a closed document must make the guide inert (no FFI calls into a
     -- torn-down crengine object), and a scheduled task must still be
     -- cancellable even if the plugin dropped its own reference to it
@@ -1189,94 +1154,103 @@ do
 end
 
 do
-    -- scrolling must refuse to run when the reader is not ready for it: the
-    -- crash on the user's device happened right after a sentence was found,
-    -- i.e. inside the scroll step
-    local function make(pos_y, current_pos)
+    -- following the sentence in SCROLL mode, from the screen boxes
+    local function make(box_y, current_pos, box_h, header_h)
         local guide, plugin = guide_instance({
-            doc = { getPosFromXPointer = function() return { y = pos_y } end },
             view_mode = "scroll",
+            doc = { getHeaderHeight = function() return header_h or 0 end },
         })
         plugin.guide_scroll = true
         plugin.ui.rolling = {
             current_pos = current_pos,
             _gotoPos = function(_, p) plugin.scrolled_to = p end,
         }
+        guide._boxes = { { x = 0, y = box_y, w = 100, h = box_h or 16 } }
         return guide, plugin
     end
 
-    -- current_pos not a number: never scroll
-    local guide, plugin = make(700, nil)
-    guide:ensureVisible({ pos0 = "c0" })
-    check("no scroll when current_pos is nil", plugin.scrolled_to, nil)
+    -- comfortably inside the screen: leave the view alone
+    local guide, plugin = make(300, 0)
+    guide:follow(guide._boxes)
+    check("no scroll while the sentence is comfortable", plugin.scrolled_to, nil)
 
-    guide, plugin = make(700, "junk")
-    guide:ensureVisible({ pos0 = "c0" })
-    check("no scroll when current_pos is not a number", plugin.scrolled_to, nil)
+    -- below the trigger line: scroll so it sits at the configured fraction
+    guide, plugin = make(700, 500)
+    guide:follow(guide._boxes)
+    check("scrolls when the sentence drops too low",
+        plugin.scrolled_to, 500 + (700 - math.floor(800 * Guide.defaults.scroll_position)))
 
-    -- already at the very top: nothing to gain, and it is what crashed
-    guide, plugin = make(0, 0)
-    guide:ensureVisible({ pos0 = "c0" })
-    check("no scroll while already at the top of the document", plugin.scrolled_to, nil)
+    -- hidden above the text area (behind the status bar): scroll back down
+    guide, plugin = make(10, 500, 16, 29)
+    guide:follow(guide._boxes)
+    check_true("scrolls back up when the sentence is above the text area",
+        plugin.scrolled_to ~= nil and plugin.scrolled_to < 500)
 
-    -- a normal sentence below the trigger line does scroll
-    guide, plugin = make(700, 100)
-    guide:ensureVisible({ pos0 = "c0" })
-    check("scrolls to bring the sentence up",
-        plugin.scrolled_to, 700 - math.floor(800 * Guide.defaults.scroll_position))
-
-    -- a scroll that changes nothing is skipped
-    local target = 700 - math.floor(800 * Guide.defaults.scroll_position)
-    guide, plugin = make(700, target)
-    guide:ensureVisible({ pos0 = "c0" })
+    -- a scroll that would change nothing is skipped
+    local target = math.floor(800 * Guide.defaults.scroll_position)
+    guide, plugin = make(target, 500)
+    guide:follow(guide._boxes)
     check("no scroll when already at the target position", plugin.scrolled_to, nil)
 
-    -- the position lookup failing is not fatal
-    guide, plugin = guide_instance({
-        doc = { getPosFromXPointer = function() error("boom") end },
-        view_mode = "scroll",
-    })
-    plugin.guide_scroll = true
-    plugin.ui.rolling = { current_pos = 0, _gotoPos = function(_, p) plugin.scrolled_to = p end }
-    guide:ensureVisible({ pos0 = "c0" })
-    check("a failing position lookup is swallowed", plugin.scrolled_to, nil)
+    -- following can be switched off entirely
+    guide, plugin = make(700, 500)
+    plugin.guide_scroll = false
+    guide:follow(guide._boxes)
+    check("no scroll when following is disabled", plugin.scrolled_to, nil)
+
+    -- a broken rolling offset is survivable
+    guide, plugin = make(700, "junk")
+    guide:follow(guide._boxes)
+    check("no scroll when current_pos is not a number", plugin.scrolled_to, nil)
+
+    -- no boxes at all is fine too
+    guide, plugin = make(700, 500)
+    guide:follow(nil)
+    check("no scroll without boxes", plugin.scrolled_to, nil)
 end
 
-
 do
-    -- paged mode: the sentence is followed by turning the page
-    local function make(pos_y, dimen_h)
-        local guide, plugin = guide_instance({
-            doc = {
-                getPosFromXPointer = function() return { y = pos_y } end,
-                getHeaderHeight = function() return 0 end,
-            },
-        })
+    -- following the sentence in PAGE mode: turn the page via nextTick
+    local function make(box_y, box_h, dimen_h)
+        local guide, plugin = guide_instance()
         plugin.guide_scroll = true
         plugin.ui.dimen = { h = dimen_h or 800, w = 600 }
-        plugin.ui.events = {}
-        plugin.ui.handleEvent = function(self, ev) table.insert(self.events, ev) end
+        plugin.ui.handleEvent = function(_, ev)
+            plugin.events = plugin.events or {}
+            table.insert(plugin.events, ev)
+        end
+        guide._boxes = { { x = 0, y = box_y, w = 100, h = box_h or 16 } }
         return guide, plugin
     end
 
-    -- the sentence is still on the visible page: leave the view alone
-    local guide, plugin = make(300)
-    guide:ensureVisible({ pos0 = "c0" })
-    check("no page turn while the sentence is visible", #plugin.ui.events, 0)
+    -- the sentence is fully on the page: nothing happens
+    local guide, plugin = make(300, 16)
+    guide:follow(guide._boxes)
+    check("no page turn while the sentence is visible", #ticks, 0)
 
-    -- the sentence starts below the bottom of the page: turn the page
-    -- (the viewport is 800 tall, so past that it must trigger a turn)
-    guide, plugin = make(820)
-    guide:ensureVisible({ pos0 = "c0" })
-    check("turns the page once the sentence leaves it", #plugin.ui.events, 1)
-    check("and asks for the next view",
-        plugin.ui.events[1] and plugin.ui.events[1].name, "GotoViewRel")
+    -- the sentence starts below the text area (a sentence that merely runs
+    -- over the bottom edge is being read and must not be taken away)
+    guide, plugin = make(820, 16)
+    guide:follow(guide._boxes)
+    check("a page turn is queued", #ticks, 1)
+    check("and only one while it is pending", guide.turn_pending, true)
+    guide:follow(guide._boxes)
+    check("no second turn queued for the same sentence", #ticks, 1)
 
-    -- following can be switched off entirely
-    guide, plugin = make(820)
+    -- running the tick performs the turn
+    local fn = table.remove(ticks, 1)
+    fn()
+    check("the tick turned the page", #(plugin.events or {}), 1)
+    check("with the right event", plugin.events[1].name, "GotoViewRel")
+    check("and cleared the pending flag", guide.turn_pending, false)
+
+    -- following can be switched off
+    guide, plugin = make(820, 16)
     plugin.guide_scroll = false
-    guide:ensureVisible({ pos0 = "c0" })
-    check("no page turn when following is disabled", #plugin.ui.events, 0)
+    ticks = {}
+    guide:follow(guide._boxes)
+    check("no page turn when following is disabled", #ticks, 0)
+    ticks = {}
 end
 
 -- ---------------------------------------------------------------------------
