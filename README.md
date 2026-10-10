@@ -229,9 +229,10 @@ time and keeps a single underline under the sentence being read.
 - **Scrolling**: when the current sentence would drop below about 2/3 of the
   usable height (or has gone off the top), the view scrolls so that the sentence
   sits about 1/3 from the top, always leaving text visible underneath it.
-- **Manual control**: bind *AutoWords: next sentence* / *AutoWords: previous
-  sentence* to a gesture to move by hand. Touching the screen restarts the
-  countdown for the current sentence, like in page mode.
+- **Manual control**: bind *AutoWords: next sentence*, *AutoWords: previous
+  sentence* and *AutoWords: pause/resume* to gestures to drive the guide by hand.
+  Touching the screen restarts the countdown for the current sentence, and pausing
+  keeps the underline where it is, so you can look away without losing your place.
 
 ## Known limitations
 
@@ -291,7 +292,7 @@ python -m pip install lupa      # test runner only; the plugin itself has no dep
 python tests/run_tests.py
 ```
 
-Current status: **242 checks, 0 failures**.
+Current status: **252 checks, 0 failures**.
 
 ```
 .                            # the repository root is the plugin directory

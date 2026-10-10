@@ -47,6 +47,7 @@ function Guide:new(plugin)
     return setmetatable({
         plugin = plugin,
         scheduled = false,
+        paused = false,
         xp = nil,             -- xpointer the next sentence starts at
         segment = nil,        -- { text, pos0, pos1, sboxes } of the current sentence
         saved_temp_drawer = nil,
@@ -272,6 +273,7 @@ end
 function Guide:step()
     self.scheduled = false
     if not self:isActive() then return end
+    if self.paused then return end
 
     -- Do not move while a menu / dialog / dictionary popup is up.
     local top_widget = UIManager:getTopmostVisibleWidget() or {}
@@ -316,6 +318,7 @@ end
 
 function Guide:start()
     self:unschedule()
+    self.paused = false
     self.xp = nil
     self.segment = nil
     if not self:isActive() then return end
@@ -324,9 +327,43 @@ end
 
 function Guide:stop()
     self:unschedule()
+    self.paused = false
     self.xp = nil
     self.segment = nil
     self:clearUnderline()
+end
+
+--- Hold on the sentence being read: no further movement until resumed.
+--- The underline stays where it is, so it is obvious where reading stopped.
+function Guide:pause()
+    if not self:isActive() then return end
+    self.paused = true
+    self:unschedule()
+    logger.dbg("AutoWords guide: paused on", (self.segment and self.segment.text or "?"))
+end
+
+--- Continue reading: restart the countdown for the sentence on screen.
+function Guide:resume()
+    if not self:isActive() then return end
+    self.paused = false
+    self:unschedule()
+    local seg = self.segment
+    if seg then
+        -- stay on the same sentence, give it its full time again
+        self:scheduleIn(self:delayForSentence(seg.text or ""))
+    else
+        self:step()
+    end
+end
+
+--- @treturn boolean true when the guide is now paused
+function Guide:togglePause()
+    if self.paused then
+        self:resume()
+    else
+        self:pause()
+    end
+    return self.paused
 end
 
 --- The guide ran out of text (or was stopped from elsewhere).

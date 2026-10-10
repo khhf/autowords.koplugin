@@ -475,7 +475,7 @@ do
     check("settings dialog shown", #shown_widgets, 1)
     local dlg = shown_widgets[1]
     check("settings dialog kind", dlg._kind, "ButtonDialog")
-    check("settings dialog rows", #dlg.buttons, 3)
+    check("settings dialog rows", #dlg.buttons, 4)
     check_true("dialog title shows the page count",
         dlg.title:find("12", 1, true) ~= nil)
 
@@ -1021,6 +1021,58 @@ do
     plugin.ui.rolling.current_pos = 200 -- sentence scrolled off the top
     guide:ensureVisible({ pos0 = "xp" })
     check("scrolls back up when the sentence is above the viewport", plugin.scrolled_to, 0)
+end
+
+do
+    -- pause holds on the current sentence, resume restarts its countdown
+    local doc = {
+        getXPointer = function() return "xp1" end,
+        getPrevVisibleChar = function() return nil end,
+        getTextFromXPointers = function() return "" end,
+        extendXPointersToSentenceSegment = function(_, p0)
+            if p0 == "xp1" then return { text = "一句。", pos0 = "xp1", pos1 = "xp2" } end
+            return nil
+        end,
+        getScreenBoxesFromPositions = function() return { { x = 0, y = 0, w = 10, h = 10 } } end,
+        getPosFromXPointer = function() return { y = 100 } end,
+        getCurrentPage = function() return 1 end,
+    }
+    local view = {
+        highlight = { temp = {}, temp_drawer = "lighten" },
+        dialog = {},
+        footer_visible = false,
+    }
+    local plugin = new_instance()
+    plugin.ui.document = doc
+    plugin.ui.view = view
+    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
+    plugin.reading_mode = "sentence"
+    plugin.enabled = true
+    plugin.guide_task = function() end
+    local guide = Guide:new(plugin)
+
+    scheduled = {}
+    guide:step()
+    check("guide is running before the pause", #scheduled, 1)
+
+    check("pause toggles on", guide:togglePause(), true)
+    check("a paused guide cancels its timer", #scheduled, 0)
+    check("the underline stays while paused", #(view.highlight.temp[1] or {}), 1)
+
+    scheduled = {}
+    guide:step()
+    check("a paused guide does not advance", #scheduled, 0)
+    check("still on the same sentence", guide.segment.text, "一句。")
+
+    check("pause toggles off", guide:togglePause(), false)
+    check("resume schedules the sentence again", #scheduled, 1)
+    check("resume uses that sentence's delay",
+        scheduled[1].delay, guide:delayForSentence("一句。"))
+
+    -- stopping clears the paused flag as well
+    guide:pause()
+    guide:stop()
+    check("stop clears the paused flag", guide.paused, false)
 end
 
 -- ---------------------------------------------------------------------------

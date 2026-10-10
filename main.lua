@@ -636,6 +636,12 @@ function AutoWords:onDispatcherRegisterActions()
         event = "AutoWordsPrevSentence",
         title = _("AutoWords: previous sentence"),
         reader = true,
+    })
+    Dispatcher:registerAction("autowords_pause", {
+        category = "none",
+        event = "AutoWordsPause",
+        title = _("AutoWords: pause/resume (sentence guide)"),
+        reader = true,
         separator = true,
     })
 end
@@ -647,6 +653,19 @@ end
 
 function AutoWords:onAutoWordsPrevSentence()
     if self.guide then self.guide:goBack() end
+    return true
+end
+
+--- Pause/resume the sentence guide without losing your place.
+function AutoWords:onAutoWordsPause()
+    if not self.guide or self:readingMode() ~= "sentence" or not self.enabled then
+        return false
+    end
+    local paused = self.guide:togglePause()
+    UIManager:show(InfoMessage:new{
+        text = paused and _("AutoWords guide paused.") or _("AutoWords guide resumed."),
+        timeout = 2,
+    })
     return true
 end
 
@@ -870,6 +889,8 @@ function AutoWords:showSettingsDialog()
                         self:setEnabled(not self.enabled)
                     end,
                 },
+            },
+            {
                 {
                     text = _("Close"),
                     callback = function() UIManager:close(dialog) end,
@@ -877,6 +898,16 @@ function AutoWords:showSettingsDialog()
             },
         },
     }
+    -- while the sentence guide runs, offer pause/resume next to start/stop
+    if self.enabled and self:readingMode() == "sentence" then
+        table.insert(dialog.buttons[3], {
+            text = (self.guide and self.guide.paused) and _("Resume") or _("Pause"),
+            callback = function()
+                UIManager:close(dialog)
+                if self.guide then self.guide:togglePause() end
+            end,
+        })
+    end
     UIManager:show(dialog)
 end
 
