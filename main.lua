@@ -420,6 +420,20 @@ function AutoWords:currentPage()
     if ui.paging then return ui.paging.current_page end
 end
 
+--- A value that changes whenever the view actually moves.
+---
+--- Page numbers are NOT enough: in scroll mode a page turn moves the view by a
+--- screen but often stays inside the same crengine page, which made the plugin
+--- think nothing had moved and stop with "end of the document reached".
+function AutoWords:currentPosition()
+    local ui = self.ui
+    if not ui then return nil end
+    if ui.rolling and ui.rolling.current_pos then
+        return ui.rolling.current_pos
+    end
+    return self:currentPage()
+end
+
 --- Timer callback: turn the page, then schedule the next turn.
 function AutoWords:tick()
     self.scheduled = false
@@ -436,7 +450,7 @@ function AutoWords:tick()
         return
     end
 
-    local page_before = self:currentPage()
+    local pos_before = self:currentPosition()
     self.self_turning = true
     self.ui:handleEvent(Event:new("GotoViewRel", self.distance))
     self.self_turning = false
@@ -444,11 +458,13 @@ function AutoWords:tick()
     -- Measure the new page once the UI has settled, then continue.
     UIManager:nextTick(function()
         if not self:isActive() then return end
-        local page_after = self:currentPage()
-        if page_before and page_after and page_before == page_after then
+        local pos_after = self:currentPosition()
+        if pos_before and pos_after and pos_before == pos_after then
             -- The view did not move: we are at the end of the document.
             -- Confirm once (the view may not have settled yet) before stopping.
             self.no_move_count = self.no_move_count + 1
+            logger.dbg("AutoWords: no movement (", pos_before, "->", pos_after, ")",
+                self.no_move_count, "of 2")
             if self.no_move_count >= 2 then
                 self.no_move_count = 0
                 self:setEnabled(false)
@@ -519,15 +535,22 @@ function AutoWords:stopGuide()
 end
 
 --- Called by the guide when it runs out of text to show.
-function AutoWords:onGuideFinished()
+function AutoWords:onGuideFinished(reason)
     if not self.enabled then return end
     self.enabled = false
     G_reader_settings:makeFalse("autowords_enabled")
     self:refreshMenu()
-    UIManager:show(InfoMessage:new{
-        text = _("AutoWords stopped: the end of the document has been reached."),
-        timeout = 3,
-    })
+    if reason == "no_position" or reason == "failed" then
+        UIManager:show(InfoMessage:new{
+            text = _("AutoWords stopped: this position could not be read as a sentence."),
+            timeout = 4,
+        })
+    else
+        UIManager:show(InfoMessage:new{
+            text = _("AutoWords stopped: the end of the document has been reached."),
+            timeout = 3,
+        })
+    end
 end
 
 function AutoWords:setEnabled(on)

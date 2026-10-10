@@ -123,17 +123,41 @@ end
 -- Sentence lookup
 -- ---------------------------------------------------------------------------
 
---- Walk backwards from `xp` until we are at a sentence boundary, so that the
---- first sentence shown is a complete one.  Bounded, because a paragraph
---- without any punctuation would otherwise walk the whole document.
+--- Try to read the sentence starting at this xpointer.
+---
+--- crengine only extends a range to a sentence when the position really is a
+--- sentence boundary, so "did it extend?" doubles as our boundary test -- far
+--- more reliable than inspecting the surrounding characters ourselves.
+-- @treturn table|nil segment, @treturn string|nil reason when there is none
+function Guide:trySentence(xp)
+    local doc = self.plugin.ui.document
+    if not xp then return nil, "no_position" end
+    local ok, seg = pcall(doc.extendXPointersToSentenceSegment, doc, xp, xp)
+    if not ok then
+        logger.warn("AutoWords guide: extendXPointersToSentenceSegment failed:", seg)
+        return nil, "failed"
+    end
+    if not seg or not seg.pos0 or not seg.pos1 then
+        return nil, "empty"
+    end
+    if seg.pos1 == seg.pos0 then
+        -- crengine did not extend: this is not a sentence boundary
+        return nil, "not_a_boundary"
+    end
+    return seg
+end
+
+--- Walk backwards until crengine agrees this is a sentence start, so the first
+--- sentence shown is a complete one.  Bounded, because a paragraph without any
+--- punctuation would otherwise walk the whole document.
 function Guide:findSentenceStart(xp)
     local doc = self.plugin.ui.document
     local cur = xp
     for _ = 1, 200 do
-        local prev = doc:getPrevVisibleChar(cur)
-        if not prev or prev == cur then return cur end
-        local chunk = doc:getTextFromXPointers(prev, cur)
-        if Guide.isBoundaryText(chunk) then return cur end
+        local seg = self:trySentence(cur)
+        if seg then return seg.pos0 or cur end
+        local ok, prev = pcall(doc.getPrevVisibleChar, doc, cur)
+        if not ok or not prev or prev == cur then break end
         cur = prev
     end
     return cur
@@ -144,17 +168,34 @@ end
 function Guide:currentSegment()
     local doc = self.plugin.ui.document
     if not self.xp then
-        self.xp = self:findSentenceStart(doc:getXPointer())
+        local ok, here = pcall(doc.getXPointer, doc)
+        if not ok or not here then
+            self.stop_reason = "no_position"
+            return nil
+        end
+        self.xp = self:findSentenceStart(here)
     end
-    local ok, seg = pcall(doc.extendXPointersToSentenceSegment, doc, self.xp, self.xp)
-    if not ok then
-        logger.warn("AutoWords guide: extendXPointersToSentenceSegment failed:", seg)
-        return nil
+
+    -- Usually self.xp is a sentence start and the first try succeeds.  When it
+    -- does not (crengine's idea of a boundary can differ from ours, e.g. right
+    -- after a comma), step forward a little instead of declaring the book
+    -- finished -- that used to stop the guide on the first sentence.
+    local xp = self.xp
+    for _ = 1, 60 do
+        local seg = self:trySentence(xp)
+        if seg then
+            self.xp = xp
+            return seg
+        end
+        local ok, nxt = pcall(doc.getNextVisibleChar, doc, xp)
+        if not ok or not nxt or nxt == xp then break end
+        xp = nxt
     end
-    if not seg or not seg.pos0 or not seg.pos1 or seg.pos1 == seg.pos0 then
-        return nil
-    end
-    return seg
+
+    -- We walked to the end of the visible text without finding a sentence.
+    self.stop_reason = "end_of_document"
+    logger.dbg("AutoWords guide: no sentence found at", tostring(self.xp))
+    return nil
 end
 
 --- The screen boxes of a segment, one per displayed line.
@@ -284,7 +325,7 @@ function Guide:step()
 
     local seg = self:currentSegment()
     if not seg then
-        self:finish("end of document")
+        self:finish(self.stop_reason or "end_of_document")
         return
     end
 

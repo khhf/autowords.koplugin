@@ -1075,6 +1075,73 @@ do
     check("stop clears the paused flag", guide.paused, false)
 end
 
+do
+    -- a position that crengine refuses to extend must not end the guide:
+    -- the guide steps forward until it finds a real sentence boundary
+    local doc = {
+        getXPointer = function() return "mid" end,
+        getPrevVisibleChar = function() return nil end,
+        getNextVisibleChar = function(_, xp)
+            if xp == "mid" then return "start" end
+            return xp
+        end,
+        extendXPointersToSentenceSegment = function(_, p0, p1)
+            if p0 == "start" then
+                return { text = "整句。", pos0 = "start", pos1 = "next" }
+            end
+            return { text = "", pos0 = p0, pos1 = p1 } -- did not extend
+        end,
+        getScreenBoxesFromPositions = function() return { { x = 0, y = 0, w = 10, h = 10 } } end,
+        getPosFromXPointer = function() return { y = 100 } end,
+        getCurrentPage = function() return 1 end,
+    }
+    local view = {
+        highlight = { temp = {}, temp_drawer = "lighten" },
+        dialog = {},
+        footer_visible = false,
+    }
+    local plugin = new_instance()
+    plugin.ui.document = doc
+    plugin.ui.view = view
+    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
+    plugin.reading_mode = "sentence"
+    plugin.enabled = true
+    plugin.guide_task = function() end
+
+    local guide = Guide:new(plugin)
+    scheduled = {}
+    guide:step()
+    check("guide recovers from a non-boundary position", guide.segment.text, "整句。")
+    check("and keeps running", #scheduled, 1)
+end
+
+do
+    -- when it really is the end, the plugin is told why
+    local doc = {
+        getXPointer = function() return "end" end,
+        getPrevVisibleChar = function() return nil end,
+        getNextVisibleChar = function(_, xp) return xp end,
+        extendXPointersToSentenceSegment = function(_, p0, p1)
+            return { text = "", pos0 = p0, pos1 = p1 }
+        end,
+        getScreenBoxesFromPositions = function() return nil end,
+        getCurrentPage = function() return 1 end,
+    }
+    local plugin = new_instance()
+    plugin.ui.document = doc
+    plugin.ui.view = { highlight = { temp = {}, temp_drawer = "lighten" }, dialog = {}, footer_visible = false }
+    plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
+    plugin.reading_mode = "sentence"
+    plugin.enabled = true
+    plugin.guide_task = function() end
+
+    local guide = Guide:new(plugin)
+    local reason
+    plugin.onGuideFinished = function(_, r) reason = r end
+    guide:step()
+    check("end of document is reported as such", reason, "end_of_document")
+end
+
 -- ---------------------------------------------------------------------------
 
 print(string.format("\n%d checks, %d failures", checks, failures))
