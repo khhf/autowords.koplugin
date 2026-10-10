@@ -901,6 +901,7 @@ local function guide_instance(overrides)
         highlight = { temp = {}, temp_drawer = "lighten" },
         dialog = {},
         footer_visible = false,
+        view_mode = (overrides and overrides.view_mode) or "page",
     }
     plugin.ui.rolling = { current_pos = 0, _gotoPos = function() end }
     plugin.reading_mode = "sentence"
@@ -1076,6 +1077,7 @@ do
     local function make(scroll_y, current_pos)
         local guide, plugin = guide_instance({
             doc = { getPosFromXPointer = function() return { y = scroll_y } end },
+            view_mode = "scroll",
         })
         plugin.guide_scroll = true
         plugin.ui.rolling = {
@@ -1193,6 +1195,7 @@ do
     local function make(pos_y, current_pos)
         local guide, plugin = guide_instance({
             doc = { getPosFromXPointer = function() return { y = pos_y } end },
+            view_mode = "scroll",
         })
         plugin.guide_scroll = true
         plugin.ui.rolling = {
@@ -1231,11 +1234,49 @@ do
     -- the position lookup failing is not fatal
     guide, plugin = guide_instance({
         doc = { getPosFromXPointer = function() error("boom") end },
+        view_mode = "scroll",
     })
     plugin.guide_scroll = true
     plugin.ui.rolling = { current_pos = 0, _gotoPos = function(_, p) plugin.scrolled_to = p end }
     guide:ensureVisible({ pos0 = "c0" })
     check("a failing position lookup is swallowed", plugin.scrolled_to, nil)
+end
+
+
+do
+    -- paged mode: the sentence is followed by turning the page
+    local function make(pos_y, dimen_h)
+        local guide, plugin = guide_instance({
+            doc = {
+                getPosFromXPointer = function() return { y = pos_y } end,
+                getHeaderHeight = function() return 0 end,
+            },
+        })
+        plugin.guide_scroll = true
+        plugin.ui.dimen = { h = dimen_h or 800, w = 600 }
+        plugin.ui.events = {}
+        plugin.ui.handleEvent = function(self, ev) table.insert(self.events, ev) end
+        return guide, plugin
+    end
+
+    -- the sentence is still on the visible page: leave the view alone
+    local guide, plugin = make(300)
+    guide:ensureVisible({ pos0 = "c0" })
+    check("no page turn while the sentence is visible", #plugin.ui.events, 0)
+
+    -- the sentence starts below the bottom of the page: turn the page
+    -- (the viewport is 800 tall, so past that it must trigger a turn)
+    guide, plugin = make(820)
+    guide:ensureVisible({ pos0 = "c0" })
+    check("turns the page once the sentence leaves it", #plugin.ui.events, 1)
+    check("and asks for the next view",
+        plugin.ui.events[1] and plugin.ui.events[1].name, "GotoViewRel")
+
+    -- following can be switched off entirely
+    guide, plugin = make(820)
+    plugin.guide_scroll = false
+    guide:ensureVisible({ pos0 = "c0" })
+    check("no page turn when following is disabled", #plugin.ui.events, 0)
 end
 
 -- ---------------------------------------------------------------------------

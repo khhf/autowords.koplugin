@@ -23,6 +23,7 @@ sentence xpointers, and the guide is a no-op there.
 ]]
 
 local Count = require("autowords_count")
+local Event = require("ui/event")
 local Screen = require("device").screen
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
@@ -492,20 +493,94 @@ end
 -- ---------------------------------------------------------------------------
 
 --- Keep the current sentence comfortably on screen: if it fell below the
---- trigger line (or above the top), scroll so that it sits at the configured
---- fraction of the usable height.
+--- Follow the sentence being read.
 ---
---- Scrolling is by far the most invasive thing the guide does (it drives
---- ReaderRolling, which touches the page layout, the footer and the document
---- position), so every precondition is checked here and every failure is
---- swallowed: a guide that does not scroll is still useful, a guide that takes
---- the reader down with it is not.
+--- Two very different mechanisms, picked by the view mode:
+---
+---  * Paged mode ("page"): the sentence is followed by turning the page, the
+---    same way a reader would -- the underline can only ever be on the page
+---    that is currently shown, so when the sentence leaves the visible part of
+---    the page the view has to move on.
+---  * Scroll mode ("scroll"): the view is nudged so the sentence sits at the
+---    configured fraction of the screen.
+---
+--- Following is the most invasive thing the guide does (it drives
+--- ReaderRolling, which touches page layout, the footer and the document
+--- position), so every precondition is checked and every failure is swallowed:
+--- a guide that does not follow is still useful, a guide that takes the reader
+--- down with it is not.
 function Guide:ensureVisible(seg)
     if self.plugin.guide_scroll == false then return end
     local ui = self.plugin.ui
     local rolling = ui.rolling
     local doc = ui.document
-    if not rolling or not doc.getPosFromXPointer or not rolling._gotoPos then return end
+    if not rolling then return end
+
+    self:stage("getPosFromXPointer (locate the sentence)")
+    local ok, pos = pcall(doc.getPosFromXPointer, doc, seg.pos0)
+    if not ok or not pos or type(pos.y) ~= "number" then
+        self:trace("not following: cannot locate the sentence")
+        return
+    end
+
+    local view = ui.view
+    local view_mode = (view and view.view_mode) or "page"
+    self:trace("sentence at y=%d, view mode is %s", pos.y, view_mode)
+
+    if view_mode == "page" then
+        self:followInPageMode(pos)
+    else
+        self:followInScrollMode(pos)
+    end
+end
+
+--- Paged mode: is the sentence inside the part of the page that is shown?
+function Guide:followInPageMode(pos)
+    local ui = self.plugin.ui
+    local doc = ui.document
+
+    -- Where the visible area starts and how tall it is.  getVisiblePageCount()
+    -- is 1 or 2 depending on the layout, and the document reports the header
+    -- height it reserved.
+    local ok_top, top = pcall(doc.getHeaderHeight, doc)
+    if not ok_top or type(top) ~= "number" then top = 0 end
+
+    local view = ui.view
+    local footer_h = 0
+    if view and view.footer_visible and view.footer and view.footer.getHeight then
+        local ok2, h = pcall(view.footer.getHeight, view.footer)
+        if ok2 and type(h) == "number" then footer_h = h end
+    end
+
+    local page_h = (ui.dimen and ui.dimen.h) or Screen:getHeight()
+    local bottom = page_h - footer_h
+    if bottom <= top then return end
+
+    -- The underline is drawn from the line boxes; a sentence whose first line
+    -- already sits below the visible bottom is not readable any more.
+    local margin = Screen:scaleBySize(4)
+    if pos.y + margin < bottom then
+        return -- still on screen, nothing to do
+    end
+
+    self:trace("the sentence left the visible page (%d >= %d): turning the page",
+        pos.y, bottom)
+    local ok3, err = pcall(function()
+        self.plugin.ui:handleEvent(Event:new("GotoViewRel", 1))
+    end)
+    if not ok3 then
+        self:trace("turning the page failed: %s", tostring(err))
+        return false
+    end
+    return true
+end
+
+--- Scroll mode: nudge the view so the sentence sits at the configured fraction.
+function Guide:followInScrollMode(pos)
+    local ui = self.plugin.ui
+    local rolling = ui.rolling
+    local doc = ui.document
+    if not doc.getPosFromXPointer or not rolling._gotoPos then return end
 
     -- ReaderRolling keeps its scroll offset here; without a sane number any
     -- arithmetic below is meaningless, and _gotoPos() would be called with
@@ -513,13 +588,6 @@ function Guide:ensureVisible(seg)
     local current = rolling.current_pos
     if type(current) ~= "number" then
         self:trace("not scrolling: current_pos is %s", tostring(current))
-        return
-    end
-
-    self:stage("getPosFromXPointer (locate the sentence)")
-    local ok, pos = pcall(doc.getPosFromXPointer, doc, seg.pos0)
-    if not ok or not pos or type(pos.y) ~= "number" then
-        self:trace("not scrolling: cannot locate the sentence")
         return
     end
 
