@@ -206,12 +206,14 @@ refresh, and on e-ink that is the expensive part -- noticeably more than plain p
 turning. It is meant for when you want something for your eyes to follow, to keep your
 attention away from your phone.
 
-How it works: one call to `document:getTextFromPositions()` returns the whole visible text
-plus the screen box of every line. The text is split into sentences in plain Lua, each
-sentence is mapped onto the lines it covers, and the underline is drawn from those boxes
-through KOReader's temporary highlight -- so nothing is ever written to the annotation
-store. Sentences follow one another with a delay derived from the same reading speed the
-whole-page mode uses.
+How it works: one call to `document:getTextFromPositions()` returns the line boxes of the
+visible page, and then the text of each line is read back from its own box -- KOReader's
+page text breaks at paragraphs, not at screen lines, so it cannot be used directly. The
+text is split into sentences in plain Lua, each sentence is mapped onto the lines it
+covers, and the underline is drawn from those boxes through KOReader's temporary
+highlight -- so nothing is ever written to the annotation store. Sentences follow one
+another with a delay derived from the same reading speed the whole-page mode uses, and the
+page is turned once everything on it has been read.
 
 Known limits, documented rather than hidden:
 
@@ -228,9 +230,14 @@ Known limits, documented rather than hidden:
 Everything was derived from the KOReader `master` sources (file and line references are in
 the code comments) and is covered by the offline test suite.
 
-- **Whole page mode and the status-bar icon have been used on a real device.**
-- **The sentence guide has not.** It ships as an experiment: the logic is tested, the
-  drawing is not. Diagnostics output and logs are very welcome.
+- **Both modes have been exercised on a real KOReader** (a container build): the page
+  turner with its speed calibration, the status-bar icon with its live countdown, and the
+  sentence guide -- underline moving sentence by sentence, page turning when the page is
+  done.
+- Behaviour was additionally checked against the KOReader sources; the references are in
+  the code comments.
+- Diagnostics and logs from other devices are still very welcome, in particular from a
+  Kindle, where the rendering timing differs.
 
 ## Contributing
 
