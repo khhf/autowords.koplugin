@@ -74,7 +74,9 @@ local AutoWords = WidgetContainer:extend{
     guide_end_pause = nil,
     guide_paragraph_pause = nil,
     guide_punct_scale = nil,     -- scales every punctuation pause at once
-    guide_scroll = nil,          -- follow the sentence by scrolling (nil = yes)
+    -- Following the sentence by scrolling is the most invasive thing the guide
+    -- does, so it starts OFF: the underline can be verified on its own first.
+    guide_scroll = false,
     guide_scroll_position = nil, -- keep the sentence at this fraction of the usable height
 
     -- runtime state
@@ -635,7 +637,7 @@ function AutoWords:init()
     self.guide_end_pause = tonumber(G_reader_settings:readSetting("autowords_guide_end_pause"))
     self.guide_paragraph_pause = tonumber(G_reader_settings:readSetting("autowords_guide_paragraph_pause"))
     self.guide_punct_scale = tonumber(G_reader_settings:readSetting("autowords_guide_punct_scale"))
-    self.guide_scroll = G_reader_settings:nilOrTrue("autowords_guide_scroll")
+    self.guide_scroll = G_reader_settings:isTrue("autowords_guide_scroll")
     self.guide_scroll_position = tonumber(G_reader_settings:readSetting("autowords_guide_scroll_position"))
     self.enabled = G_reader_settings:isTrue("autowords_enabled")
 

@@ -406,6 +406,12 @@ end
 --- Keep the current sentence comfortably on screen: if it fell below the
 --- trigger line (or above the top), scroll so that it sits at the configured
 --- fraction of the usable height.
+---
+--- Scrolling is by far the most invasive thing the guide does (it drives
+--- ReaderRolling, which touches the page layout, the footer and the document
+--- position), so every precondition is checked here and every failure is
+--- swallowed: a guide that does not scroll is still useful, a guide that takes
+--- the reader down with it is not.
 function Guide:ensureVisible(seg)
     if self.plugin.guide_scroll == false then return end
     local ui = self.plugin.ui
@@ -413,9 +419,19 @@ function Guide:ensureVisible(seg)
     local doc = ui.document
     if not rolling or not doc.getPosFromXPointer or not rolling._gotoPos then return end
 
+    -- ReaderRolling keeps its scroll offset here; without a sane number any
+    -- arithmetic below is meaningless, and _gotoPos() would be called with
+    -- garbage.
+    local current = rolling.current_pos
+    if type(current) ~= "number" then
+        self:trace("not scrolling: current_pos is %s", tostring(current))
+        return
+    end
+
+    self:stage("getPosFromXPointer (locate the sentence)")
     local ok, pos = pcall(doc.getPosFromXPointer, doc, seg.pos0)
-    if not ok or not pos or not pos.y then
-        logger.dbg("AutoWords guide: cannot locate the sentence for scrolling")
+    if not ok or not pos or type(pos.y) ~= "number" then
+        self:trace("not scrolling: cannot locate the sentence")
         return
     end
 
@@ -423,25 +439,34 @@ function Guide:ensureVisible(seg)
     local footer_h = 0
     if view and view.footer_visible and view.footer and view.footer.getHeight then
         local ok2, h = pcall(view.footer.getHeight, view.footer)
-        if ok2 then footer_h = h or 0 end
+        if ok2 and type(h) == "number" then footer_h = h end
     end
     local usable_h = Screen:getHeight() - footer_h
     if usable_h <= 0 then return end
 
-    local current = rolling.current_pos or 0
     local screen_y = pos.y - current
     local trigger = usable_h * self:setting("scroll_trigger")
     if screen_y >= 0 and screen_y <= trigger then
         return -- already comfortably placed
     end
 
+    -- Never scroll before the document has been scrolled at all: at the very
+    -- top there is nothing to gain, and asking ReaderRolling to move while it
+    -- is still settling is what took the process down.
+    if current <= 0 and pos.y <= 0 then
+        self:trace("not scrolling: already at the top of the document")
+        return
+    end
+
     local target_y = math.floor(usable_h * self:setting("scroll_position"))
     local new_pos = pos.y - target_y
     if new_pos < 0 then new_pos = 0 end
-    logger.dbg("AutoWords guide: scrolling to", new_pos, "(sentence was at", screen_y, ")")
+    if new_pos == current then return end
+
+    self:stage("scrolling to %d (sentence was at %d)", new_pos, screen_y)
     local ok3, err = pcall(rolling._gotoPos, rolling, new_pos, false)
     if not ok3 then
-        logger.warn("AutoWords guide: scrolling failed:", err)
+        self:trace("scrolling failed: %s", tostring(err))
     end
 end
 

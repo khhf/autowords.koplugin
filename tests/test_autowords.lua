@@ -1046,6 +1046,7 @@ do
         local guide, plugin = guide_instance({
             doc = { getPosFromXPointer = function() return { y = scroll_y } end },
         })
+        plugin.guide_scroll = true
         plugin.ui.rolling = {
             current_pos = current_pos or 0,
             _gotoPos = function(_, p) plugin.scrolled_to = p end,
@@ -1057,7 +1058,7 @@ do
     guide:ensureVisible({ pos0 = "c0" })
     check("no scroll while the sentence is comfortable", plugin.scrolled_to, nil)
 
-    guide, plugin = make(700)
+    guide, plugin = make(700, 100)
     guide:ensureVisible({ pos0 = "c0" })
     check("scrolls when the sentence drops too low",
         plugin.scrolled_to, 700 - math.floor(800 * Guide.defaults.scroll_position))
@@ -1151,6 +1152,58 @@ do
         content:find("underline on page", 1, true) ~= nil)
     check_true("it records the repaint", content:find("repainting", 1, true) ~= nil)
     os.remove(path)
+end
+
+do
+    -- scrolling must refuse to run when the reader is not ready for it: the
+    -- crash on the user's device happened right after a sentence was found,
+    -- i.e. inside the scroll step
+    local function make(pos_y, current_pos)
+        local guide, plugin = guide_instance({
+            doc = { getPosFromXPointer = function() return { y = pos_y } end },
+        })
+        plugin.guide_scroll = true
+        plugin.ui.rolling = {
+            current_pos = current_pos,
+            _gotoPos = function(_, p) plugin.scrolled_to = p end,
+        }
+        return guide, plugin
+    end
+
+    -- current_pos not a number: never scroll
+    local guide, plugin = make(700, nil)
+    guide:ensureVisible({ pos0 = "c0" })
+    check("no scroll when current_pos is nil", plugin.scrolled_to, nil)
+
+    guide, plugin = make(700, "junk")
+    guide:ensureVisible({ pos0 = "c0" })
+    check("no scroll when current_pos is not a number", plugin.scrolled_to, nil)
+
+    -- already at the very top: nothing to gain, and it is what crashed
+    guide, plugin = make(0, 0)
+    guide:ensureVisible({ pos0 = "c0" })
+    check("no scroll while already at the top of the document", plugin.scrolled_to, nil)
+
+    -- a normal sentence below the trigger line does scroll
+    guide, plugin = make(700, 100)
+    guide:ensureVisible({ pos0 = "c0" })
+    check("scrolls to bring the sentence up",
+        plugin.scrolled_to, 700 - math.floor(800 * Guide.defaults.scroll_position))
+
+    -- a scroll that changes nothing is skipped
+    local target = 700 - math.floor(800 * Guide.defaults.scroll_position)
+    guide, plugin = make(700, target)
+    guide:ensureVisible({ pos0 = "c0" })
+    check("no scroll when already at the target position", plugin.scrolled_to, nil)
+
+    -- the position lookup failing is not fatal
+    guide, plugin = guide_instance({
+        doc = { getPosFromXPointer = function() error("boom") end },
+    })
+    plugin.guide_scroll = true
+    plugin.ui.rolling = { current_pos = 0, _gotoPos = function(_, p) plugin.scrolled_to = p end }
+    guide:ensureVisible({ pos0 = "c0" })
+    check("a failing position lookup is swallowed", plugin.scrolled_to, nil)
 end
 
 -- ---------------------------------------------------------------------------
